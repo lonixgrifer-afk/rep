@@ -42,7 +42,6 @@ PAY_DEFAULT_AMOUNT = float(os.getenv("PAY_DEFAULT_AMOUNT", "5"))
 PAY_CHECK_ATTEMPTS = int(os.getenv("PAY_CHECK_ATTEMPTS", "10"))
 PAY_CHECK_INTERVAL_SECONDS = int(os.getenv("PAY_CHECK_INTERVAL_SECONDS", "10"))
 
-
 def _get_token_from_db(key: str) -> str:
     row = db.query(f"SELECT value FROM settings WHERE key='{key}'", fetch="one") if 'db' in globals() else None
     return (row[0] if row and row[0] else "").strip()
@@ -64,7 +63,6 @@ def _get_token_from_db(key: str) -> str:
         return (str(err) if err is not None else json.dumps(payload, ensure_ascii=False), str(code) if code is not None else None)
     return json.dumps(payload, ensure_ascii=False), None
 
-
 warnings.filterwarnings(
     "ignore",
     message=r"You may be able to resolve this warning by setting `model_config\['protected_namespaces'\] = \(\)`.*",
@@ -74,11 +72,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-
 class Form(StatesGroup):
     submit_type = State()
     num = State()
-
 
 class AdminForm(StatesGroup):
     priority_add = State()
@@ -94,14 +90,11 @@ class AdminForm(StatesGroup):
     payout_amount = State()
     app_topup_amount = State()
 
-
 class SupportForm(StatesGroup):
     request = State()
 
-
 class CodeForm(StatesGroup):
     waiting_code = State()
-
 
 class Database:
     def __init__(self, db_file):
@@ -171,11 +164,8 @@ class Database:
             return PRIORITY_PRICE_PER_NUMBER
         return base
 
-
-
 def now_kz_naive() -> datetime:
     return datetime.now(KZ_TZ).replace(tzinfo=None)
-
 
 def parse_dt(value):
     if isinstance(value, datetime):
@@ -192,7 +182,6 @@ def parse_dt(value):
     except ValueError:
         return now_kz_naive()
 
-
 def get_users_count(db_path: Path) -> int:
     try:
         conn = sqlite3.connect(str(db_path))
@@ -207,7 +196,6 @@ def get_users_count(db_path: Path) -> int:
     except Exception:
         return 0
 
-
 def resolve_db_path() -> Path:
     """Resolve a stable DB path so restarts do not create a new empty DB."""
     env_path = os.getenv("TITAN_DB_PATH")
@@ -219,10 +207,8 @@ def resolve_db_path() -> Path:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return DB_PATH
 
-
 RESOLVED_DB_PATH = resolve_db_path()
 db = Database(str(RESOLVED_DB_PATH))
-
 
 def parse_numbers(text: str):
     raw_numbers = re.findall(r"\+?\d{10,12}", text or "")
@@ -237,7 +223,6 @@ def parse_numbers(text: str):
             normalized.append(f"+{digits}")
     return normalized
 
-
 def unique_numbers(numbers: list[str]) -> list[str]:
     seen = set()
     unique = []
@@ -246,7 +231,6 @@ def unique_numbers(numbers: list[str]) -> list[str]:
             seen.add(num)
             unique.append(num)
     return unique
-
 
 async def check_sub(user_id: int):
     if is_user_admin(user_id):
@@ -283,27 +267,31 @@ async def check_sub(user_id: int):
 
     return False
 
-
 def is_user_admin(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
     row = db.query("SELECT is_admin FROM users WHERE user_id=?", (user_id,), fetch="one")
     return bool(row and row[0])
 
-
 def is_user_banned(user_id: int) -> bool:
     row = db.query("SELECT banned FROM users WHERE user_id=?", (user_id,), fetch="one")
     return bool(row and row[0])
-
 
 def is_user_priority(user_id: int) -> bool:
     row = db.query("SELECT priority FROM users WHERE user_id=?", (user_id,), fetch="one")
     return bool(row and row[0])
 
-
 def get_user_price(user_id: int) -> float:
     return db.get_price(user_id)
 
+def fmt_money(value: float | int) -> str:
+    try:
+        amount = float(value)
+    except Exception:
+        amount = 0.0
+    if amount.is_integer():
+        return str(int(amount))
+    return f"{amount:.2f}".rstrip("0").rstrip(".")
 
 def get_menu_caption(is_subscribed: bool) -> str:
     if not is_subscribed:
@@ -311,11 +299,10 @@ def get_menu_caption(is_subscribed: bool) -> str:
     price = get_user_price(None)
     return (
         "\n"
-        f"📌 Ставка за номер: {price}$\n"
+        f"📌 Ставка за номер: {fmt_money(price)}$\n"
         "💳 Оплата момент!\n\n"
         "<b>🏠 Главное меню:</b>"
     )
-
 
 async def send_main_menu(chat_id: int, user_id: int):
     await bot.send_photo(
@@ -326,28 +313,22 @@ async def send_main_menu(chat_id: int, user_id: int):
         parse_mode="HTML",
     )
 
-
 def get_group_binding_key(chat_id: int, thread_id: int | None) -> str:
     return f"gid:{chat_id}:{thread_id or 0}"
 
-
 def get_topic_mode_key(chat_id: int, thread_id: int | None) -> str:
     return f"mode:{chat_id}:{thread_id or 0}"
-
 
 def get_topic_mode(chat_id: int, thread_id: int | None) -> str:
     row = db.query("SELECT value FROM settings WHERE key=?", (get_topic_mode_key(chat_id, thread_id),), fetch="one")
     mode = (row[0] if row and row[0] else "MIX").upper()
     return mode if mode in {"SMS", "QR", "MIX"} else "MIX"
 
-
 def set_topic_mode(chat_id: int, thread_id: int | None, mode: str):
     db.query("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (get_topic_mode_key(chat_id, thread_id), mode.upper()))
 
-
 def get_thread_id(message_obj) -> int:
     return int(getattr(message_obj, "message_thread_id", 0) or 0)
-
 
 def get_linked_groups():
     rows = db.query("SELECT key, value FROM settings WHERE key LIKE 'gid:%'")
@@ -365,11 +346,9 @@ def get_linked_groups():
     groups.sort(key=lambda item: (item[0], item[1]))
     return groups
 
-
 def is_group_linked(chat_id: int, thread_id: int | None) -> bool:
     tid = int(thread_id or 0)
     return bool(db.query("SELECT 1 FROM settings WHERE key=?", (get_group_binding_key(chat_id, tid),), fetch="one"))
-
 
 def group_scope_allows(chat_id: int, thread_id: int | None) -> bool:
     # Ограничиваем только если привязки есть именно для текущего чата.
@@ -378,12 +357,10 @@ def group_scope_allows(chat_id: int, thread_id: int | None) -> bool:
         return True
     return is_group_linked(chat_id, thread_id)
 
-
 def set_support_target(chat_id: int, thread_id: int | None, title: str = ""):
     tid = int(thread_id or 0)
     value = f"{chat_id}:{tid}:{title or ''}"
     db.query("INSERT OR REPLACE INTO settings(key, value) VALUES('support_target', ?)", (value,))
-
 
 def get_support_target() -> tuple[int, int] | None:
     row = db.query("SELECT value FROM settings WHERE key='support_target'", fetch="one")
@@ -397,11 +374,9 @@ def get_support_target() -> tuple[int, int] | None:
     except ValueError:
         return None
 
-
 def set_payout_target(chat_id: int, thread_id: int | None):
     tid = int(thread_id or 0)
     db.query("INSERT OR REPLACE INTO settings(key, value) VALUES('payout_target', ?)", (f"{chat_id}:{tid}",))
-
 
 def get_payout_target() -> tuple[int, int] | None:
     row = db.query("SELECT value FROM settings WHERE key='payout_target'", fetch="one")
@@ -415,14 +390,12 @@ def get_payout_target() -> tuple[int, int] | None:
     except ValueError:
         return None
 
-
 def mask_username(username: str | None, user_id: int) -> str:
     base = (username or f"id{user_id}").strip().lstrip("@")
     if len(base) <= 2:
         return base[0] + "*" if base else f"id{user_id}"
     keep = max(1, len(base) // 2)
     return base[:keep] + ("*" * (len(base) - keep))
-
 
 async def notify_payout_group(user_id: int, number: str, amount: float, status: str = "выплачено"):
     target = (ADMIN_ID, 0)
@@ -433,7 +406,7 @@ async def notify_payout_group(user_id: int, number: str, amount: float, status: 
         f"Пользователь: <code>{masked}</code>\n"
         f"ID: <code>{user_id}</code>\n"
         f"Номер: <code>{number}</code>\n"
-        f"Сумма: <b>{float(amount):.2f}$</b>\n"
+        f"Сумма: <b>{fmt_money(amount)}$</b>\n"
         f"Статус: <b>{status}</b>"
     )
     chat_id, thread_id = target
@@ -445,24 +418,19 @@ async def notify_payout_group(user_id: int, number: str, amount: float, status: 
     except Exception:
         pass
 
-
 def is_work_enabled() -> bool:
     row = db.query("SELECT value FROM settings WHERE key='work_enabled'", fetch="one")
     return (row[0] if row else "1") == "1"
 
-
 def set_work_enabled(enabled: bool):
     db.query("INSERT OR REPLACE INTO settings(key,value) VALUES('work_enabled',?)", ("1" if enabled else "0",))
-
 
 def is_instant_payout_enabled() -> bool:
     row = db.query("SELECT value FROM settings WHERE key='instant_payout_enabled'", fetch="one")
     return (row[0] if row else "1") == "1"
 
-
 def set_instant_payout_enabled(enabled: bool):
     db.query("INSERT OR REPLACE INTO settings(key,value) VALUES('instant_payout_enabled',?)", ("1" if enabled else "0",))
-
 
 def get_app_balance() -> float:
     row = db.query("SELECT value FROM settings WHERE key='app_balance_usdt'", fetch="one")
@@ -471,10 +439,8 @@ def get_app_balance() -> float:
     except Exception:
         return 0
 
-
 def set_app_balance(value: float):
     db.query("INSERT OR REPLACE INTO settings(key,value) VALUES('app_balance_usdt',?)", (f"{float(value):.2f}",))
-
 
 def get_user_today_stats(uid: int) -> tuple[int, int, int]:
     today = now_kz_naive().strftime("%Y-%m-%d")
@@ -482,7 +448,6 @@ def get_user_today_stats(uid: int) -> tuple[int, int, int]:
     vstal = db.query("SELECT COUNT(*) FROM sessions WHERE user_id=? AND date(start_time)=? AND status IN ('vstal','slet','otvyaz')", (uid, today), fetch="one")[0]
     slet = db.query("SELECT COUNT(*) FROM sessions WHERE user_id=? AND date(COALESCE(end_time,start_time))=? AND status='slet'", (uid, today), fetch="one")[0]
     return int(submitted or 0), int(vstal or 0), int(slet or 0)
-
 
 def parse_break_lines(text: str):
     entries = []
@@ -499,7 +464,6 @@ def parse_break_lines(text: str):
             continue
     return entries
 
-
 def unique_break_rows(rows):
     seen = set()
     unique = []
@@ -512,7 +476,6 @@ def unique_break_rows(rows):
         seen.add(key)
         unique.append((start_label, end_label))
     return unique
-
 
 def get_break_minutes(group_id: int | None, start_time: datetime, end_time: datetime) -> int:
     if not group_id:
@@ -531,30 +494,24 @@ def get_break_minutes(group_id: int | None, start_time: datetime, end_time: date
             minutes += int((overlap_end - overlap_start).total_seconds() // 60)
     return minutes
 
-
 def effective_minutes(group_id: int | None, start_time: datetime, end_time: datetime) -> int:
     total = int((end_time - start_time).total_seconds() // 60)
     return max(0, total - get_break_minutes(group_id, start_time, end_time))
-
 
 def cleanup_queue_expired():
     cutoff = (now_kz_naive() - timedelta(hours=QUEUE_TTL_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
     db.query("DELETE FROM queue WHERE created_at IS NOT NULL AND created_at < ?", (cutoff,))
 
-
 def cleanup_paid_reports():
     return
-
 
 def cleanup_archives():
     # Очищаем именно архивные записи в 00:00 МСК.
     db.query("DELETE FROM sessions WHERE status!='vstal' OR credited_notified=1")
 
-
 def get_user_balance(user_id: int):
     row = db.query("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE user_id=?", (user_id,), fetch="one")
     return float(row[0] if row else 0)
-
 
 def get_office_label_for_group(group_id: int | None) -> str:
     if not group_id:
@@ -565,7 +522,6 @@ def get_office_label_for_group(group_id: int | None) -> str:
         if title:
             return title
     return "Офис 1"
-
 
 def can_manage_number(user_id: int, owner_id: int, number: str) -> bool:
     if is_user_admin(user_id):
@@ -586,7 +542,6 @@ def can_manage_number(user_id: int, owner_id: int, number: str) -> bool:
         return s_row[0] == user_id
     return False
 
-
 def build_producers_page(page: int):
     total = db.query("SELECT COUNT(*) FROM users", fetch="one")[0]
     max_page = max(1, (total + PRODUCERS_PAGE_SIZE - 1) // PRODUCERS_PAGE_SIZE)
@@ -595,28 +550,20 @@ def build_producers_page(page: int):
     rows = db.query("SELECT user_id, username, banned FROM users ORDER BY user_id DESC LIMIT ? OFFSET ?", (PRODUCERS_PAGE_SIZE, offset))
     return rows, page, max_page
 
-
 def build_user_queue_view(uid: int):
     rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC", (uid,))
-    total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
-    user_priority = 1 if is_user_priority(uid) else 0
+    total_waiting = len(rows)
     kb = InlineKeyboardBuilder()
-    lines = ["<b>📋 Ваши номера в очереди</b>", f"Всего номеров в общей очереди: <b>{total_waiting}</b>", ""]
+    lines = ["<b>📋 Общая очередь (ваши номера)</b>", f"Всего ваших номеров в очереди: <b>{total_waiting}</b>", ""]
     if not rows:
         lines.append("Номеров в очереди нет.")
     else:
-        for q_id, number, submit_type in rows:
-            q_pos = db.query(
-                "SELECT COUNT(*) FROM queue q JOIN users u ON q.user_id=u.user_id WHERE q.status='waiting' AND (u.priority > ? OR (u.priority = ? AND q.id <= ?))",
-                (user_priority, user_priority, q_id),
-                fetch="one",
-            )[0]
+        for q_pos, (q_id, number, submit_type) in enumerate(rows, start=1):
             t = "QR" if submit_type == "qr" else "Код"
             lines.append(f"• <code>{number}</code> [{t}] — очередь: {q_pos}")
             kb.row(types.InlineKeyboardButton(text=f"{number} • {t} • {q_pos}", callback_data=f"u_q_del_{q_id}"))
     kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="u_back"))
     return "\n".join(lines), kb.as_markup()
-
 
 def build_admin_reports_view(page: int):
     today_str = now_kz_naive().strftime("%Y-%m-%d")
@@ -636,7 +583,7 @@ def build_admin_reports_view(page: int):
 
     lines = [
         f"<b>🧾 Отчёт за сегодня • страница {page}/{max_page}</b>",
-        f"<b>💵 За сегодня:</b> {total_today}$",
+        f"<b>💵 За сегодня:</b> {fmt_money(total_today)}$",
         "",
         "Пользователь | ID | Номер | Сумма",
         "",
@@ -649,9 +596,9 @@ def build_admin_reports_view(page: int):
             label = f"@{name}" if name else f"ID:{u_id}"
             amt = float(amount or 0)
             total += amt
-            lines.append(f"• {label} | <code>{u_id}</code> | <code>{number or '-'}</code> | {amt}$")
+            lines.append(f"• {label} | <code>{u_id}</code> | <code>{number or '-'}</code> | {fmt_money(amt)}$")
         lines.append("")
-        lines.append(f"<b>ИТОГО ПО СТРАНИЦЕ: {total}$</b>")
+        lines.append(f"<b>ИТОГО ПО СТРАНИЦЕ: {fmt_money(total)}$</b>")
 
     kb = InlineKeyboardBuilder()
     nav = []
@@ -664,22 +611,17 @@ def build_admin_reports_view(page: int):
     kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="adm_main"))
     return "\n".join(lines), kb.as_markup()
 
-
 def sms_request_key(user_id: int, number: str) -> str:
     return f"sms_req:{user_id}:{number}"
-
 
 def sms_done_key(user_id: int, number: str) -> str:
     return f"sms_done:{user_id}:{number}"
 
-
 def qr_request_key(user_id: int, number: str) -> str:
     return f"qr_req:{user_id}:{number}"
 
-
 def qr_done_key(user_id: int, number: str) -> str:
     return f"qr_done:{user_id}:{number}"
-
 
 def resolve_user_id(text: str) -> int | None:
     if not text:
@@ -691,7 +633,6 @@ def resolve_user_id(text: str) -> int | None:
     if value.isdigit():
         return int(value)
     return None
-
 
 async def get_main_menu_kb(user_id: int):
     kb = InlineKeyboardBuilder()
@@ -707,12 +648,10 @@ async def get_main_menu_kb(user_id: int):
         kb.row(InlineKeyboardButton(text="⚙️ Админ", callback_data="adm_main"))
     return kb.as_markup()
 
-
 def back_kb(target: str = "u_back"):
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 Назад", callback_data=target)
     return kb.as_markup()
-
 
 async def render_action_message(call: CallbackQuery, text: str, markup=None):
     try:
@@ -726,7 +665,6 @@ async def render_action_message(call: CallbackQuery, text: str, markup=None):
     except Exception:
         pass
 
-
 async def render_report_message(call: CallbackQuery, caption_text: str, markup):
     try:
         await call.message.edit_caption(caption=caption_text, reply_markup=markup, parse_mode="HTML")
@@ -738,7 +676,6 @@ async def render_report_message(call: CallbackQuery, caption_text: str, markup):
         return
     except Exception:
         pass
-
 
 async def issue_next_number(chat_id: int, thread_id: int | None, operator_id: int):
     if not is_work_enabled():
@@ -763,7 +700,6 @@ async def issue_next_number(chat_id: int, thread_id: int | None, operator_id: in
     q_id, user_id, number, submit_type = res
     db.query("UPDATE queue SET status='proc', proc_by=?, repeat_requested=0, qr_requested=0 WHERE id=?", (operator_id, q_id))
     return user_id, number, submit_type
-
 
 @dp.callback_query()
 async def cb_handler(call: CallbackQuery, state: FSMContext):
@@ -822,10 +758,11 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
     elif data == "u_queue_all":
         cleanup_queue_expired()
         rows = db.query(
-            "SELECT id, number, submit_type FROM queue WHERE status='waiting' ORDER BY id ASC LIMIT 80"
+            "SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC LIMIT 80",
+            (uid,),
         )
-        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
-        lines = ["<b>📋 Общая очередь: (очередь бота)</b>", f"Всего номеров в боте: <b>{total_waiting}</b>", ""]
+        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE user_id=? AND status='waiting'", (uid,), fetch="one")[0]
+        lines = ["<b>📋 Общая очередь</b>", f"Всего ваших номеров: <b>{total_waiting}</b>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
@@ -839,24 +776,24 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
 
     elif data.startswith("u_queue_pick_"):
         qid = int(data.replace("u_queue_pick_", ""))
-        row = db.query("SELECT number, submit_type, user_id FROM queue WHERE id=? AND status='waiting'", (qid,), fetch="one")
+        row = db.query("SELECT number, submit_type, user_id FROM queue WHERE id=? AND user_id=? AND status='waiting'", (qid, uid), fetch="one")
         if not row:
             return await call.answer("⚠️ Номер уже вышел из очереди", show_alert=False)
-        number, submit_type, owner_id = row
-        db.query("DELETE FROM queue WHERE id=? AND status='waiting'", (qid,))
+        number, submit_type, _owner_id = row
+        db.query("DELETE FROM queue WHERE id=? AND user_id=? AND status='waiting'", (qid, uid))
 
         cleanup_queue_expired()
-        rows = db.query("SELECT id, number, submit_type FROM queue WHERE status='waiting' ORDER BY id ASC LIMIT 80")
-        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
-        lines = ["<b>📋 Общая очередь: (очередь бота)</b>", f"Всего номеров в боте: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
+        rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC LIMIT 80", (uid,))
+        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE user_id=? AND status='waiting'", (uid,), fetch="one")[0]
+        lines = ["<b>📋 Общая очередь</b>", f"Всего ваших номеров: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
         else:
-            for next_qid, next_number, next_submit_type in rows:
+            for pos, (next_qid, next_number, next_submit_type) in enumerate(rows, start=1):
                 t = "QR" if next_submit_type == "qr" else "SMS"
-                lines.append(f"• <code>{next_number}</code> [{t}]")
-                kb.row(types.InlineKeyboardButton(text=f"{next_number} • {t}", callback_data=f"u_queue_pick_{next_qid}"))
+                lines.append(f"• <code>{next_number}</code> [{t}] — {pos}")
+                kb.row(types.InlineKeyboardButton(text=f"{next_number} • {t} • {pos}", callback_data=f"u_queue_pick_{next_qid}"))
         kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="u_back"))
         await render_action_message(call, "\n".join(lines), kb.as_markup())
 
@@ -867,7 +804,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
             "FROM sessions WHERE user_id=? AND (status='slet' OR status='otvyaz' OR (status='vstal' AND credited_notified=1)) ORDER BY id DESC LIMIT 300",
             (uid,),
         )
-        lines = [f"<b>💰 Баланс:</b> <b>{balance}$</b>", "<b>📱 Архив номеров:</b>", ""]
+        lines = [f"<b>💰 Баланс:</b> <b>{fmt_money(balance)}$</b>", "<b>📱 Архив номеров:</b>", ""]
         if not rows:
             lines.append("Пока пусто")
         else:
@@ -882,7 +819,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 else:
                     mark = "-"
                     amount = 0
-                lines.append(f"• <code>{number}</code> | {st} | {amount}$ | {mark}")
+                lines.append(f"• <code>{number}</code> | {st} | {fmt_money(amount)}$ | {mark}")
         await render_action_message(call, "\n".join(lines), back_kb())
 
     elif data == "my_stats":
@@ -894,7 +831,6 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
             f"Слетело: <b>{slet}</b>"
         )
         await render_action_message(call, txt, back_kb())
-
 
     elif data in {"admin_menu", "adm_main"}:
         if not is_user_admin(uid):
@@ -937,7 +873,6 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="u_back"))
         await render_action_message(call, "🛡 <b>Админ-панель</b>", kb.as_markup())
         await call.answer("✅ Статус обновлён", show_alert=False)
-
 
     elif data == "adm_queue_view" or data.startswith("adm_queue_page_"):
         if not is_user_admin(uid):
@@ -1029,7 +964,6 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="adm_main"))
         await render_action_message(call, "\n".join(lines), kb.as_markup())
 
-
     elif data.startswith("adm_group_unlink_"):
         if not is_user_admin(uid):
             return
@@ -1071,7 +1005,6 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         await state.set_state(AdminForm.queue_remove_user)
         await state.update_data(search_mode="user")
         await call.message.answer("Введите @username или ID для поиска пользователя:")
-
 
     elif data.startswith("adm_user_menu_"):
         if not is_user_admin(uid):
@@ -1132,11 +1065,10 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
             payout_src_message_id=call.message.message_id if call.message else None,
         )
         await call.message.answer(
-            f"Отправьте сообщение/чек для пользователя <code>{target_uid}</code> по номеру <code>{number}</code> на сумму <b>{amount}$</b>.",
+            f"Отправьте сообщение/чек для пользователя <code>{target_uid}</code> по номеру <code>{number}</code> на сумму <b>{fmt_money(amount)}$</b>.",
             parse_mode="HTML",
         )
         await call.answer()
-
 
     elif data == "support":
         await call.message.answer(f"💻 Тех. поддержка: {SUPPORT_URL}")
@@ -1284,14 +1216,14 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                         kb_pay.row(types.InlineKeyboardButton(text="💸 Выплатить", callback_data=f"adm_payout_req_{sid}"))
                         await bot.send_message(
                             ADMIN_ID,
-                            f"✅ Номер успешно засчитан\nНомер: <code>{v_num}</code>\nID: <code>{v_uid}</code>\nК выплате: <b>{amount}$</b>",
+                            f"✅ Номер успешно засчитан\nНомер: <code>{v_num}</code>\nID: <code>{v_uid}</code>\nК выплате: <b>{fmt_money(amount)}$</b>",
                             parse_mode="HTML",
                             reply_markup=kb_pay.as_markup(),
                         )
                     except Exception:
                         pass
                     try:
-                        await bot.send_message(v_uid, f"✅ Номер {v_num} засчитан. Вам начислено {amount}$.")
+                        await bot.send_message(v_uid, f"✅ Номер {v_num} засчитан. Вам начислено {fmt_money(amount)}$.")
                     except Exception:
                         pass
             else:
@@ -1354,7 +1286,6 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
 
     await call.answer()
 
-
 @dp.message(CommandStart())
 async def start(message: types.Message):
     db.query("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (message.from_user.id, message.from_user.username))
@@ -1364,7 +1295,6 @@ async def start(message: types.Message):
         if ref_id_raw.isdigit() and int(ref_id_raw) != message.from_user.id:
             db.query("INSERT OR IGNORE INTO referrals (inviter_id, invited_id) VALUES (?, ?)", (int(ref_id_raw), message.from_user.id))
     await send_main_menu(message.chat.id, message.from_user.id)
-
 
 @dp.message(Command("set"))
 async def set_group(message: types.Message):
@@ -1384,18 +1314,12 @@ async def set_group(message: types.Message):
         db.query("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, f"{title}{suffix}"))
         await message.answer("🔒 Привязка установлена для этого чата/топика.\nДля выдачи номера используйте `/num`.", parse_mode="Markdown")
 
-
-
-
 @dp.message(Command("dbinfo"))
 async def db_info(message: types.Message):
     if not is_user_admin(message.from_user.id):
         return
     users_count = db.query("SELECT COUNT(*) FROM users", fetch="one")[0]
     await message.answer(f"🗄 <b>DB INFO</b>\nПуть: <code>{RESOLVED_DB_PATH}</code>\nПользователей: <b>{users_count}</b>", parse_mode="HTML")
-
-
-
 
 @dp.message(AdminForm.set_price)
 async def set_price_handler(message: types.Message, state: FSMContext):
@@ -1410,8 +1334,7 @@ async def set_price_handler(message: types.Message, state: FSMContext):
         return await message.answer("❌ Цена должна быть больше нуля")
     db.query("INSERT OR REPLACE INTO settings(key,value) VALUES('price_per_number',?)", (str(value),))
     await state.clear()
-    await message.answer(f"✅ Новый тариф: {value}$")
-
+    await message.answer(f"✅ Новый тариф: {fmt_money(value)}$")
 
 @dp.message(AdminForm.admin_add)
 async def admin_add_handler(message: types.Message, state: FSMContext):
@@ -1424,7 +1347,6 @@ async def admin_add_handler(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Администратор добавлен.")
 
-
 @dp.message(AdminForm.admin_remove)
 async def admin_remove_handler(message: types.Message, state: FSMContext):
     if not is_user_admin(message.from_user.id):
@@ -1435,7 +1357,6 @@ async def admin_remove_handler(message: types.Message, state: FSMContext):
     db.query("UPDATE users SET is_admin=0 WHERE user_id=?", (target_id,))
     await state.clear()
     await message.answer("✅ Администратор удален.")
-
 
 @dp.message(F.text.regexp(r"^\s*\d{3,10}\s*$"))
 async def sms_code_catcher(message: types.Message):
@@ -1489,9 +1410,6 @@ async def sms_code_catcher(message: types.Message):
             pass
     await message.answer(f"✅ Код по номеру {number} принят. Номер вошёл в работу.")
 
-
-
-
 @dp.message(AdminForm.direct_message)
 async def admin_direct_message(message: types.Message, state: FSMContext):
     if not is_user_admin(message.from_user.id):
@@ -1510,9 +1428,6 @@ async def admin_direct_message(message: types.Message, state: FSMContext):
     except Exception:
         await message.answer("⚠️ Не удалось отправить сообщение")
     await state.clear()
-
-
-
 
 @dp.message(AdminForm.payout_amount)
 async def admin_user_inline_payout(message: types.Message, state: FSMContext):
@@ -1533,7 +1448,7 @@ async def admin_user_inline_payout(message: types.Message, state: FSMContext):
     if not text and not message.photo and not message.document:
         return await message.answer("Отправьте текст/чек (можно с фото или файлом).")
 
-    note = f"✅ Выплата по номеру {number} на сумму: {amount}$\n\n"
+    note = f"✅ Выплата по номеру {number} на сумму: {fmt_money(amount)}$\n\n"
     payload_text = note + text if text else note + "Чек отправлен администратором."
     try:
         if message.photo:
@@ -1556,7 +1471,6 @@ async def admin_user_inline_payout(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Не удалось отправить чек пользователю.")
     await state.clear()
 
-
 @dp.message(AdminForm.broadcast)
 async def admin_broadcast(message: types.Message, state: FSMContext):
     if not is_user_admin(message.from_user.id):
@@ -1571,7 +1485,6 @@ async def admin_broadcast(message: types.Message, state: FSMContext):
             pass
     await state.clear()
     await message.answer(f"✅ Рассылка завершена. Отправлено: {sent}")
-
 
 @dp.message(AdminForm.queue_remove_user)
 async def admin_queue_remove_user_handler(message: types.Message, state: FSMContext):
@@ -1599,8 +1512,6 @@ async def admin_queue_remove_user_handler(message: types.Message, state: FSMCont
     db.query("DELETE FROM queue WHERE user_id=?", (int(raw),))
     await state.clear()
     await message.answer("✅ Очередь пользователя удалена")
-
-
 
 @dp.message(Form.num)
 async def num_input(message: types.Message, state: FSMContext):
@@ -1647,7 +1558,6 @@ async def num_input(message: types.Message, state: FSMContext):
     except Exception:
         pass
 
-
 @dp.message(Command(commands=["submit", "sumbit"]))
 async def submit_cmd(message: types.Message, state: FSMContext):
     if is_user_banned(message.from_user.id):
@@ -1658,12 +1568,10 @@ async def submit_cmd(message: types.Message, state: FSMContext):
     await state.update_data(submit_type="code")
     await message.answer("📞 Введите номера (каждый с новой строки или через пробел):")
 
-
 @dp.message(Command("queue"))
 async def queue_cmd(message: types.Message):
     caption, _ = build_user_queue_view(message.from_user.id)
     await message.answer(caption, parse_mode="HTML")
-
 
 @dp.message(Command("archive"))
 async def archive_cmd(message: types.Message):
@@ -1674,7 +1582,7 @@ async def archive_cmd(message: types.Message):
         "FROM sessions WHERE user_id=? AND (status='slet' OR status='otvyaz' OR (status='vstal' AND credited_notified=1)) ORDER BY id DESC LIMIT 300",
         (uid,),
     )
-    lines = [f"<b>💰 Баланс:</b> <b>{balance}$</b>", "<b>📱 Архив номеров:</b>", ""]
+    lines = [f"<b>💰 Баланс:</b> <b>{fmt_money(balance)}$</b>", "<b>📱 Архив номеров:</b>", ""]
     if not rows:
         lines.append("Пока пусто")
     else:
@@ -1689,10 +1597,8 @@ async def archive_cmd(message: types.Message):
             else:
                 mark = "-"
                 amount = 0
-            lines.append(f"• <code>{number}</code> | {st} | {amount}$ | {mark}")
+            lines.append(f"• <code>{number}</code> | {st} | {fmt_money(amount)}$ | {mark}")
     await message.answer("\n".join(lines), parse_mode="HTML")
-
-
 
 @dp.message(F.text.regexp(r"(?i).*(^|\s)номер([.!?]|\s|$).*"))
 async def get_num(message: types.Message):
@@ -1725,12 +1631,10 @@ async def get_num(message: types.Message):
     except Exception:
         pass
 
-
 @dp.message(Command("num"))
 async def get_num_privacy_fallback(message: types.Message):
     # Если в группе включен Privacy Mode, обычный текст "номер" может не доходить до бота.
     return await get_num(message)
-
 
 async def _process_code_media(message: types.Message):
     thread_id = get_thread_id(message)
@@ -1837,11 +1741,9 @@ async def _process_code_media(message: types.Message):
     except Exception:
         await message.answer(f"⚠️ Не удалось отправить код владельцу номера {num} в ЛС.")
 
-
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     await _process_code_media(message)
-
 
 @dp.message(F.document)
 async def handle_document_image(message: types.Message):
@@ -1850,11 +1752,9 @@ async def handle_document_image(message: types.Message):
         return
     await _process_code_media(message)
 
-
 async def hold_checker():
     while True:
         await asyncio.sleep(60)
-
 
 async def credited_checker():
     while True:
@@ -1878,17 +1778,16 @@ async def credited_checker():
                 kb_pay.row(types.InlineKeyboardButton(text="💸 Выплатить", callback_data=f"adm_payout_req_{sid}"))
                 await bot.send_message(
                     ADMIN_ID,
-                    f"✅ Номер успешно засчитан\nНомер: <code>{number}</code>\nID: <code>{user_id}</code>\nК выплате: <b>{amount}$</b>",
+                    f"✅ Номер успешно засчитан\nНомер: <code>{number}</code>\nID: <code>{user_id}</code>\nК выплате: <b>{fmt_money(amount)}$</b>",
                     parse_mode="HTML",
                     reply_markup=kb_pay.as_markup(),
                 )
             except Exception:
                 pass
             try:
-                await bot.send_message(user_id, f"✅ Номер {number} засчитан. Начислено {amount}$.")
+                await bot.send_message(user_id, f"✅ Номер {number} засчитан. Начислено {fmt_money(amount)}$.")
             except Exception:
                 pass
-
 
 async def nightly_cleanup():
     while True:
@@ -1903,13 +1802,11 @@ async def nightly_cleanup():
         except Exception:
             pass
 
-
 async def main():
     asyncio.create_task(hold_checker())
     asyncio.create_task(credited_checker())
     asyncio.create_task(nightly_cleanup())
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
