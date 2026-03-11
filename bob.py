@@ -27,7 +27,8 @@ TOKEN = os.getenv("BOT_TOKEN", "8725972843:AAF-cEqRMV4oCHekRB3IP_klHRDuE_sYOt0")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8203556349"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1003837981813"))
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/carvenmax")
-SUPPORT_URL = os.getenv("SUPPORT_URL", CHANNEL_URL)
+S_URL = os.getenv("S_URL", "https://t.me/carvenwork")
+SUPPORT_URL = os.getenv("SUPPORT_URL", S_URL)
 PRICE_PER_NUMBER = float(os.getenv("PRICE_PER_NUMBER", "4"))
 QUEUE_TTL_HOURS = int(os.getenv("QUEUE_TTL_HOURS", "8"))
 PRODUCERS_PAGE_SIZE = int(os.getenv("PRODUCERS_PAGE_SIZE", "10"))
@@ -211,17 +212,21 @@ RESOLVED_DB_PATH = resolve_db_path()
 db = Database(str(RESOLVED_DB_PATH))
 
 def parse_numbers(text: str):
-    raw_numbers = re.findall(r"\+?\d{10,12}", text or "")
-    normalized = []
-    for raw in raw_numbers:
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) == 10:
-            digits = "7" + digits
-        elif len(digits) == 11 and digits.startswith("8"):
-            digits = "7" + digits[1:]
-        if len(digits) == 11 and digits.startswith("7"):
-            normalized.append(f"+{digits}")
-    return normalized
+    text = text.replace("\n", " ")
+    raw = re.findall(r'\d+', text)
+
+    numbers = []
+
+    for n in raw:
+        if len(n) == 11:
+            if n.startswith("8"):
+                n = "7" + n[1:]
+            numbers.append(n)
+
+        elif len(n) == 10:
+            numbers.append("7" + n)
+
+    return list(set(numbers))
 
 def unique_numbers(numbers: list[str]) -> list[str]:
     seen = set()
@@ -554,7 +559,7 @@ def build_user_queue_view(uid: int):
     rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC", (uid,))
     total_waiting = len(rows)
     kb = InlineKeyboardBuilder()
-    lines = ["<b>📋 Общая очередь (ваши номера)</b>", f"Всего ваших номеров в очереди: <b>{total_waiting}</b>", ""]
+    lines = ["<b>📋 Общая очередь в боте <b>{total_waiting}</b>", ""]
     if not rows:
         lines.append("Номеров в очереди нет.")
     else:
@@ -642,7 +647,7 @@ async def get_main_menu_kb(user_id: int):
         return kb.as_markup()
 
     kb.row(InlineKeyboardButton(text="☎️ Сдать номер", callback_data="u_yield"))
-    kb.row(InlineKeyboardButton(text="💾 Архив", callback_data="archive"), InlineKeyboardButton(text="📋 Общая очередь", callback_data="u_queue_all"))
+    kb.row(InlineKeyboardButton(text="💾 Архив", callback_data="archive"), InlineKeyboardButton(text="📋 Очередь", callback_data="u_queue_all"))
     kb.row(InlineKeyboardButton(text="💻 Техподдержка", url=SUPPORT_URL))
     if is_user_admin(user_id):
         kb.row(InlineKeyboardButton(text="⚙️ Админ", callback_data="adm_main"))
@@ -761,8 +766,8 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
             "SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC LIMIT 80",
             (uid,),
         )
-        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE user_id=? AND status='waiting'", (uid,), fetch="one")[0]
-        lines = ["<b>📋 Общая очередь</b>", f"Всего ваших номеров: <b>{total_waiting}</b>", ""]
+        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
+        lines = ["<b>📋 Общая очередь в боте</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
@@ -784,8 +789,8 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
 
         cleanup_queue_expired()
         rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC LIMIT 80", (uid,))
-        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE user_id=? AND status='waiting'", (uid,), fetch="one")[0]
-        lines = ["<b>📋 Общая очередь</b>", f"Всего ваших номеров: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
+        total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
+        lines = ["<b>📋 Общая очередь в боте</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
@@ -1312,7 +1317,7 @@ async def set_group(message: types.Message):
         title = message.chat.title or "Группа"
         suffix = f" • топик {thread_id}" if thread_id else " • общий чат"
         db.query("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, f"{title}{suffix}"))
-        await message.answer("🔒 Привязка установлена для этого чата/топика.\nДля выдачи номера используйте `/num`.", parse_mode="Markdown")
+        await message.answer("🔒 Привязка установлена для этого чата/топика.\nДля выдачи номера напишите `номер`.", parse_mode="Markdown")
 
 @dp.message(Command("dbinfo"))
 async def db_info(message: types.Message):
@@ -1358,7 +1363,7 @@ async def admin_remove_handler(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Администратор удален.")
 
-@dp.message(F.text.regexp(r"^\s*\d{3,10}\s*$"))
+@dp.message(StateFilter(None), F.text.regexp(r"^\s*\d{3,10}\s*$"))
 async def sms_code_catcher(message: types.Message):
     # Код от пользователя принимается только ответом на запрос SMS и только один раз.
     code = (message.text or "").strip()
@@ -1526,25 +1531,48 @@ async def num_input(message: types.Message, state: FSMContext):
     user_priority = 1 if is_user_priority(message.from_user.id) else 0
     now = now_kz_naive().strftime("%Y-%m-%d %H:%M:%S")
     for num in numbers:
-        db.query("INSERT INTO queue (user_id, number, submit_type, status, created_at) VALUES (?, ?, ?, 'waiting', ?)", (message.from_user.id, num, submit_type, now))
-        db.query("INSERT INTO submissions (user_id, number, submit_type, created_at) VALUES (?, ?, ?, ?)", (message.from_user.id, num, submit_type, now))
+        db.query(
+            "INSERT INTO queue (user_id, number, submit_type, status, created_at) VALUES (?, ?, ?, 'waiting', ?)",
+            (message.from_user.id, num, submit_type, now)
+        )
+        db.query(
+            "INSERT INTO submissions (user_id, number, submit_type, created_at) VALUES (?, ?, ?, ?)",
+            (message.from_user.id, num, submit_type, now)
+        )
 
-    last_id = db.query("SELECT MAX(id) FROM queue WHERE user_id=?", (message.from_user.id,), fetch="one")[0]
+# ✅ Получаем последний ID, проверяем на None
+    last_id = db.query(
+        "SELECT MAX(id) FROM queue WHERE user_id=?",
+        (message.from_user.id,),
+        fetch="one"
+    )[0] or 0  # <- добавили or 0, если пустая очередь
+
+# ✅ Получаем позицию в очереди, проверяем на None
     q_pos = db.query(
-        "SELECT COUNT(*) FROM queue q JOIN users u ON q.user_id=u.user_id WHERE q.status='waiting' AND (u.priority > ? OR (u.priority = ? AND q.id <= ?))",
+        "SELECT COUNT(*) FROM queue q JOIN users u ON q.user_id=u.user_id "
+        "WHERE q.status='waiting' AND (u.priority > ? OR (u.priority = ? AND q.id <= ?))",
         (user_priority, user_priority, last_id),
-        fetch="one",
-    )[0]
-    total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
+        fetch="one"
+    )[0] or 0  # <- добавили or 0
+
+# ✅ Добавляем подсчет общего числа в очереди
+    total_waiting = db.query(
+        "SELECT COUNT(*) FROM queue WHERE status='waiting'",
+        fetch="one"
+    )[0] or 0  # <- добавили or 0
+
     await state.clear()
     t = "QR" if submit_type == "qr" else "Код"
+
+# ✅ Сообщение пользователю
     await message.answer(
         f"✅ Номер(а) добавлены: <b>{len(numbers)}</b> [{t}]\n"
         f"📋 Ваша позиция в очереди: <b>{q_pos}</b>\n"
         f"📋 Всего в очереди: <b>{total_waiting}</b>",
         parse_mode="HTML",
-        reply_markup=back_kb("u_menu"),
+        reply_markup=back_kb("u_menu"),  # можно временно убрать для теста
     )
+
     try:
         username = f"@{message.from_user.username}" if message.from_user.username else "без username"
         preview = ", ".join(numbers[:5])
