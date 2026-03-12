@@ -499,6 +499,8 @@ def get_break_minutes(group_id: int | None, start_time: datetime, end_time: date
             minutes += int((overlap_end - overlap_start).total_seconds() // 60)
     return minutes
 
+
+
 def effective_minutes(group_id: int | None, start_time: datetime, end_time: datetime) -> int:
     total = int((end_time - start_time).total_seconds() // 60)
     return max(0, total - get_break_minutes(group_id, start_time, end_time))
@@ -509,6 +511,11 @@ def cleanup_queue_expired():
 
 def cleanup_paid_reports():
     return
+
+def clear_all_runtime_data():
+    db.query("DELETE FROM queue")
+    db.query("DELETE FROM sessions")
+    db.query("DELETE FROM payouts")
 
 def cleanup_archives():
     # Очищаем именно архивные записи в 00:00 МСК.
@@ -848,6 +855,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         kb.row(types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"))
         kb.row(types.InlineKeyboardButton(text="💲 Тариф", callback_data="adm_set_price"), types.InlineKeyboardButton(text="🧾 Отчёт", callback_data="adm_reports"))
         kb.row(types.InlineKeyboardButton(text="🏢 Группы", callback_data="adm_groups"), types.InlineKeyboardButton(text="📋 Очередь", callback_data="adm_queue_view"))
+        kb.row(types.InlineKeyboardButton(text="🧨 Очистка всего", callback_data="adm_clear_all"))
         kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="u_back"))
         await render_action_message(call, "🛡 <b>Админ-панель</b>", kb.as_markup())
 
@@ -863,6 +871,12 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         db.query("DELETE FROM queue")
         await call.answer("✅ Очередь очищена", show_alert=True)
 
+    elif data == "adm_clear_all":
+        if not is_user_admin(uid):
+            return
+        clear_all_runtime_data()
+        await call.answer("✅ Очищены отчёты, архивы и очередь", show_alert=True)
+
     elif data == "adm_toggle_work":
         if not is_user_admin(uid):
             return
@@ -875,6 +889,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         kb.row(types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"))
         kb.row(types.InlineKeyboardButton(text="💲 Тариф", callback_data="adm_set_price"), types.InlineKeyboardButton(text="🧾 Отчёт", callback_data="adm_reports"))
         kb.row(types.InlineKeyboardButton(text="🏢 Группы", callback_data="adm_groups"), types.InlineKeyboardButton(text="📋 Очередь", callback_data="adm_queue_view"))
+        kb.row(types.InlineKeyboardButton(text="🧨 Очистка всего", callback_data="adm_clear_all"))
         kb.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="u_back"))
         await render_action_message(call, "🛡 <b>Админ-панель</b>", kb.as_markup())
         await call.answer("✅ Статус обновлён", show_alert=False)
@@ -985,6 +1000,8 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 page = int(data.replace("adm_users_page_", ""))
             except Exception:
                 page = 1
+
+
         rows, page, max_page = build_producers_page(page)
         kb = InlineKeyboardBuilder()
         lines = [f"<b>👤 Пользователи (страница {page}/{max_page})</b>", ""]
@@ -1088,22 +1105,30 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         st = "QR" if submit_type == "qr" else "SMS"
         next_kb = InlineKeyboardBuilder()
         if submit_type == "qr":
-            next_kb.row(
-                types.InlineKeyboardButton(text="🧾 Запросить QR", callback_data=f"q_{call.message.chat.id}_{thread_id or 0}_{user_id}_{number}"),
-                types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"),
-            )
+            next_kb.row(types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"))
         else:
             next_kb.row(
                 types.InlineKeyboardButton(text="🔔 Запросить КОД", callback_data=f"r_{call.message.chat.id}_{thread_id or 0}_{user_id}_{number}"),
                 types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"),
             )
+        next_kb.row(types.InlineKeyboardButton(text="⚠️ Ошибка", callback_data=f"e_{user_id}_{number}"))
+
+        issue_text = f"Метод: <b>{st}</b>\nНомер: <code>{number}</code>\nОператор: <code>{uid}</code>"
+        if submit_type == "qr":
+            issue_text += "\n\nОтправьте QR в ответ на это сообщение."
         await call.message.answer(
-            f"Метод: <b>{st}</b>\nНомер: <code>{number}</code>\nОператор: <code>{uid}</code>\n\nОтправьте фото/код в ответ на это сообщение.",
+            issue_text,
             parse_mode="HTML",
             reply_markup=next_kb.as_markup(),
         )
         try:
-            await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
+            if submit_type == "qr":
+                db.query("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (qr_request_key(user_id, number),))
+                db.query("DELETE FROM settings WHERE key=?", (qr_done_key(user_id, number),))
+                await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте QR.")
+                await bot.send_message(user_id, f"🔔 По номеру {number} отправьте QR в ответ на это сообщение.")
+            else:
+                await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
         except Exception:
             pass
 
@@ -1403,7 +1428,7 @@ async def sms_code_catcher(message: types.Message):
         )
         kb.row(
             types.InlineKeyboardButton(text="❌ Номер не встал", callback_data=f"n_{message.from_user.id}_{number}"),
-            types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{gid}_{thread_id or 0}_{message.from_user.id}_{number}"),
+            types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{gid}_{req_thread_id or 0}_{message.from_user.id}_{number}"),
         )
         txt = f"📩 Код по номеру <code>{number}</code>: <b>{code}</b>"
         try:
@@ -1485,6 +1510,8 @@ async def admin_broadcast(message: types.Message, state: FSMContext):
     for (target_uid,) in users:
         try:
             await bot.send_message(target_uid, message.text)
+
+
             sent += 1
         except Exception:
             pass
@@ -1640,22 +1667,30 @@ async def get_num(message: types.Message):
     st = "QR" if submit_type == "qr" else "SMS"
     next_kb = InlineKeyboardBuilder()
     if submit_type == "qr":
-        next_kb.row(
-            types.InlineKeyboardButton(text="🧾 Запросить QR", callback_data=f"q_{message.chat.id}_{thread_id or 0}_{user_id}_{number}"),
-            types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"),
-        )
+        next_kb.row(types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"))
     else:
         next_kb.row(
             types.InlineKeyboardButton(text="🔔 Запросить КОД", callback_data=f"r_{message.chat.id}_{thread_id or 0}_{user_id}_{number}"),
             types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{user_id}_{number}"),
         )
+    next_kb.row(types.InlineKeyboardButton(text="⚠️ Ошибка", callback_data=f"e_{user_id}_{number}"))
+
+    issue_text = f"Метод: <b>{st}</b>\nНомер: <code>{number}</code>\nОператор: <code>{message.from_user.id}</code>"
+    if submit_type == "qr":
+        issue_text += "\n\nОтправьте QR в ответ на это сообщение."
     await message.answer(
-        f"Метод: <b>{st}</b>\nНомер: <code>{number}</code>\nОператор: <code>{message.from_user.id}</code>\n\nОтправьте фото/код в ответ на это сообщение.",
+        issue_text,
         parse_mode="HTML",
         reply_markup=next_kb.as_markup(),
     )
     try:
-        await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
+        if submit_type == "qr":
+            db.query("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (qr_request_key(user_id, number),))
+            db.query("DELETE FROM settings WHERE key=?", (qr_done_key(user_id, number),))
+            await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте QR.")
+            await bot.send_message(user_id, f"🔔 По номеру {number} отправьте QR в ответ на это сообщение.")
+        else:
+            await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
     except Exception:
         pass
 
@@ -1786,36 +1821,43 @@ async def hold_checker():
 
 async def credited_checker():
     while True:
-        await asyncio.sleep(30)
-        threshold = (now_kz_naive() - timedelta(minutes=4)).strftime("%Y-%m-%d %H:%M:%S")
-        rows = db.query(
-            "SELECT id, user_id, number, submit_type, price FROM sessions WHERE status='vstal' AND credited_notified=0 AND start_time IS NOT NULL AND start_time <= ?",
-            (threshold,),
-        )
-        for sid, user_id, number, submit_type, price in rows:
-            amount = float(price or get_user_price(user_id))
-            existing_payout = db.query("SELECT id FROM payouts WHERE user_id=? AND number=? LIMIT 1", (user_id, number), fetch="one")
-            if not existing_payout:
-                db.query(
-                    "INSERT INTO payouts(user_id, number, submit_type, amount, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, number, submit_type or 'code', amount, 'pending_manual', now_kz_naive().strftime("%Y-%m-%d %H:%M:%S")),
-                )
-            db.query("UPDATE sessions SET paid=1, credited_notified=1 WHERE id=?", (sid,))
-            try:
-                kb_pay = InlineKeyboardBuilder()
-                kb_pay.row(types.InlineKeyboardButton(text="💸 Выплатить", callback_data=f"adm_payout_req_{sid}"))
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"✅ Номер успешно засчитан\nНомер: <code>{number}</code>\nID: <code>{user_id}</code>\nК выплате: <b>{fmt_money(amount)}$</b>",
-                    parse_mode="HTML",
-                    reply_markup=kb_pay.as_markup(),
-                )
-            except Exception:
-                pass
-            try:
-                await bot.send_message(user_id, f"✅ Номер {number} засчитан. Начислено {fmt_money(amount)}$.")
-            except Exception:
-                pass
+        try:
+            await asyncio.sleep(30)
+            threshold = (now_kz_naive() - timedelta(minutes=4)).strftime("%Y-%m-%d %H:%M:%S")
+            rows = db.query(
+                "SELECT id, user_id, number, submit_type, price FROM sessions WHERE status='vstal' AND credited_notified=0 AND start_time IS NOT NULL AND start_time <= ?",
+                (threshold,),
+            )
+            for sid, user_id, number, submit_type, price in rows:
+                try:
+                    amount = float(price) if price is not None else float(get_user_price(user_id))
+                except Exception:
+                    amount = float(get_user_price(user_id))
+                existing_payout = db.query("SELECT id FROM payouts WHERE user_id=? AND number=? LIMIT 1", (user_id, number), fetch="one")
+                if not existing_payout:
+                    db.query(
+                        "INSERT INTO payouts(user_id, number, submit_type, amount, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (user_id, number, submit_type or 'code', amount, 'pending_manual', now_kz_naive().strftime("%Y-%m-%d %H:%M:%S")),
+                    )
+                db.query("UPDATE sessions SET paid=1, credited_notified=1 WHERE id=?", (sid,))
+                try:
+                    kb_pay = InlineKeyboardBuilder()
+                    kb_pay.row(types.InlineKeyboardButton(text="💸 Выплатить", callback_data=f"adm_payout_req_{sid}"))
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"✅ Номер успешно засчитан\nНомер: <code>{number}</code>\nID: <code>{user_id}</code>\nК выплате <b>{fmt_money(amount)}$</b>",
+                        parse_mode="HTML",
+                        reply_markup=kb_pay.as_markup(),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await bot.send_message(user_id, f"✅ Номер {number} засчитан. Начислено {fmt_money(amount)}$.")
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception("credited_checker cycle failed")
+
 
 async def nightly_cleanup():
     while True:
@@ -1825,10 +1867,12 @@ async def nightly_cleanup():
             next_cleanup += timedelta(days=1)
         await asyncio.sleep((next_cleanup - now).total_seconds())
         try:
+            # ВАЖНО: здесь должны быть только вызовы функций,
+            # без вложенных `def`, иначе легко поймать IndentationError.
             cleanup_paid_reports()
             cleanup_archives()
         except Exception:
-            pass
+            logging.exception("nightly_cleanup cycle failed")
 
 async def main():
     asyncio.create_task(hold_checker())
