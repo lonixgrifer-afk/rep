@@ -566,7 +566,7 @@ def build_user_queue_view(uid: int):
     rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC", (uid,))
     total_waiting = len(rows)
     kb = InlineKeyboardBuilder()
-    lines = ["<b>📋 Общая очередь в боте <b>{total_waiting}</b>", ""]
+    lines = ["<b>📋 Очередь</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", ""]
     if not rows:
         lines.append("Номеров в очереди нет.")
     else:
@@ -774,7 +774,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
             (uid,),
         )
         total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
-        lines = ["<b>📋 Общая очередь в боте</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", ""]
+        lines = ["<b>📋 Очередь</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
@@ -797,7 +797,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         cleanup_queue_expired()
         rows = db.query("SELECT id, number, submit_type FROM queue WHERE user_id=? AND status='waiting' ORDER BY id ASC LIMIT 80", (uid,))
         total_waiting = db.query("SELECT COUNT(*) FROM queue WHERE status='waiting'", fetch="one")[0]
-        lines = ["<b>📋 Общая очередь в боте</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
+        lines = ["<b>📋 Очередь</b>", f"Всего номеров в очереди: <b>{total_waiting}</b>", "", f"✅ Удален номер: <code>{number}</code>", ""]
         kb = InlineKeyboardBuilder()
         if not rows:
             lines.append("Очередь пустая")
@@ -1126,9 +1126,9 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 db.query("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (qr_request_key(user_id, number),))
                 db.query("DELETE FROM settings WHERE key=?", (qr_done_key(user_id, number),))
                 await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте QR.")
-                await bot.send_message(user_id, f"🔔 По номеру {number} отправьте QR в ответ на это сообщение.")
+                
             else:
-                await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
+                await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте запроса на код.")
         except Exception:
             pass
 
@@ -1168,6 +1168,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 try:
                     sms_kb = InlineKeyboardBuilder()
                     sms_kb.row(types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{worker_uid}_{number}"))
+                    sms_kb.row(types.InlineKeyboardButton(text="⚠️ Ошибка", callback_data=f"e_{worker_uid}_{number}"))
                     await render_action_message(
                         call,
                         f"Метод: <b>SMS</b>\nНомер: <code>{number}</code>\nОператор: <code>{uid}</code>\n\nзапрос на смс отправлен ожидайте смс",
@@ -1185,6 +1186,7 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 try:
                     qr_kb = InlineKeyboardBuilder()
                     qr_kb.row(types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{worker_uid}_{number}"))
+                    qr_kb.row(types.InlineKeyboardButton(text="⚠️ Ошибка", callback_data=f"e_{worker_uid}_{number}"))
                     await render_action_message(
                         call,
                         f"Метод: <b>QR</b>\nНомер: <code>{number}</code>\nОператор: <code>{uid}</code>\n\nзапрос на QR отправлен ожидайте QR",
@@ -1221,6 +1223,14 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
                 types.InlineKeyboardButton(text="🚫 Бан", callback_data=f"d_{v_uid}_{v_num}"),
             )
             await render_action_message(call, f"✅ <b>Номер встал</b>\nНомер: <code>{v_num}</code>", kb2.as_markup())
+            if submit_type == "qr":
+                try:
+                    await bot.send_message(
+                        v_uid,
+                        f"✅ Номер {v_num} встал, номер пошёл в работу.",
+                    )
+                except Exception:
+                    pass
 
         elif act == "s":
             row = db.query("SELECT id, start_time, submit_type, price, credited_notified FROM sessions WHERE number=? AND user_id=? AND status='vstal' ORDER BY id DESC LIMIT 1", (v_num, v_uid), fetch="one")
@@ -1284,6 +1294,10 @@ async def cb_handler(call: CallbackQuery, state: FSMContext):
         elif act == "e":
             db.query("UPDATE queue SET status='error' WHERE number=? AND user_id=? AND status='proc'", (v_num, v_uid))
             await render_action_message(call, f"⚠️ {v_num} — <b>Ошибка</b>")
+            try:
+                await bot.send_message(v_uid, f"⚠️ По номеру {v_num} оператор ответил ошибку. Попробуйте сдать заново.")
+            except Exception:
+                pass
 
         elif act == "m":
             await state.set_state(AdminForm.message_user)
@@ -1428,7 +1442,7 @@ async def sms_code_catcher(message: types.Message):
         )
         kb.row(
             types.InlineKeyboardButton(text="❌ Номер не встал", callback_data=f"n_{message.from_user.id}_{number}"),
-            types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{gid}_{req_thread_id or 0}_{message.from_user.id}_{number}"),
+            types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{gid}_{thread_id or 0}_{message.from_user.id}_{number}"),
         )
         txt = f"📩 Код по номеру <code>{number}</code>: <b>{code}</b>"
         try:
@@ -1688,9 +1702,9 @@ async def get_num(message: types.Message):
             db.query("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (qr_request_key(user_id, number),))
             db.query("DELETE FROM settings WHERE key=?", (qr_done_key(user_id, number),))
             await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте QR.")
-            await bot.send_message(user_id, f"🔔 По номеру {number} отправьте QR в ответ на это сообщение.")
+            
         else:
-            await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте кода.")
+            await bot.send_message(user_id, f"📨 Ваш номер {number} взяли. Ожидайте запроса на код.")
     except Exception:
         pass
 
@@ -1744,9 +1758,9 @@ async def _process_code_media(message: types.Message):
             )
             kb.row(
                 types.InlineKeyboardButton(text="❌ Номер не встал", callback_data=f"n_{message.from_user.id}_{number}"),
-                types.InlineKeyboardButton(text="🔁 Повтор QR", callback_data=f"qr_{gid}_{req_thread_id or 0}_{message.from_user.id}_{number}"),
+                types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{gid}_{req_thread_id or 0}_{message.from_user.id}_{number}"),
             )
-            txt = f"📩 QR по номеру <code>{number}</code>"
+            txt = f"✅ QR-код по номеру <code>{number}</code> был отправлен преподавателю"
             try:
                 if req_thread_id:
                     await bot.send_photo(gid, media_id, caption=txt, parse_mode="HTML", message_thread_id=req_thread_id, reply_markup=kb.as_markup())
@@ -1783,24 +1797,35 @@ async def _process_code_media(message: types.Message):
 
     db.query("UPDATE queue SET code_sender_id=? WHERE number=? AND user_id=? AND status='proc'", (message.from_user.id, num, worker_id))
 
+    worker_thread_id = message.message_thread_id if message.is_topic_message else 0
+
     kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="✅ Встал", callback_data=f"v_{worker_id}_{num}"), types.InlineKeyboardButton(text="⏭ Скип", callback_data=f"k_{worker_id}_{num}"))
-    kb.row(types.InlineKeyboardButton(text="⚠️ Ошибка", callback_data=f"e_{worker_id}_{num}"), types.InlineKeyboardButton(text="💬 Сообщение", callback_data=f"m_{worker_id}_{num}"))
+    kb.row(
+        types.InlineKeyboardButton(text="✅ Встал", callback_data=f"v_{worker_id}_{num}"),
+        types.InlineKeyboardButton(text="🚫 Бан", callback_data=f"d_{worker_id}_{num}"),
+    )
+    kb.row(
+        types.InlineKeyboardButton(text="❌ Номер не встал", callback_data=f"n_{worker_id}_{num}"),
+        types.InlineKeyboardButton(text="🔁 Повтор кода", callback_data=f"rr_{message.chat.id}_{worker_thread_id}_{worker_id}_{num}"),
+    )
 
     media_id = message.photo[-1].file_id if message.photo else (message.document.file_id if message.document else None)
     if not media_id:
         return await message.answer("⚠️ Не удалось обработать файл.")
 
-    await message.answer_photo(media_id, caption=f"⚙️ Работа: {num}", reply_markup=kb.as_markup())
+    await message.answer_photo(
+        media_id,
+        caption=f"✅ QR был отправлен по номеру <code>{num}</code>",
+        parse_mode="HTML",
+        reply_markup=kb.as_markup(),
+    )
 
     try:
-        worker_thread_id = message.message_thread_id if message.is_topic_message else 0
         req_kb = InlineKeyboardBuilder()
         req_kb.row(
-            types.InlineKeyboardButton(text="🔁 Запросить повторно", callback_data=f"rr_{message.chat.id}_{worker_thread_id}_{worker_id}_{num}"),
-            types.InlineKeyboardButton(text="🧾 Запросить QR", callback_data=f"qr_{message.chat.id}_{worker_thread_id}_{worker_id}_{num}"),
+            types.InlineKeyboardButton(text="🔁 Запросить повторный QR-код", callback_data=f"qr_{message.chat.id}_{worker_thread_id}_{worker_id}_{num}"),
         )
-        await bot.send_photo(worker_id, media_id, caption=f"📩 По вашему номеру {num} пришел код.", reply_markup=req_kb.as_markup())
+        await bot.send_photo(worker_id, media_id, caption=f"📩 По вашему номеру {num} пришел QR-код.", reply_markup=req_kb.as_markup())
     except Exception:
         await message.answer(f"⚠️ Не удалось отправить код владельцу номера {num} в ЛС.")
 
@@ -1852,7 +1877,10 @@ async def credited_checker():
                 except Exception:
                     pass
                 try:
-                    await bot.send_message(user_id, f"✅ Номер {number} засчитан. Начислено {fmt_money(amount)}$.")
+                    if (submit_type or "code") == "qr":
+                        await bot.send_message(user_id, f"✅ Номер {number} успешно засчитан, ожидайте вывода.")
+                    else:
+                        await bot.send_message(user_id, f"✅ Номер {number} успешно засчитан, ожидайте вывода.")
                 except Exception:
                     pass
         except Exception:
