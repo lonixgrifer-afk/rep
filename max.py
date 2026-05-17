@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-BOT_TOKEN = "967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys"
+BOT_TOKEN = "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys"
 BASE_URL = "https://web.max.ru"
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
