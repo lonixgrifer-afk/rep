@@ -17,11 +17,15 @@ BOT_TOKEN = "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys"
 CRYPTO_PAY_TOKEN = "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy"  # <--- Прямо внутри кавычек
 CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
-SESSIONS_DIR = Path("sessions")
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+SESSIONS_DIR = DATA_DIR / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
-USERS_FILE = Path("users.json")
-EVENTS_FILE = Path("events.jsonl")
-INVOICES_FILE = Path("invoices.json")
+
+USERS_FILE = DATA_DIR / "users.json"
+EVENTS_FILE = DATA_DIR / "events.jsonl"
+INVOICES_FILE = DATA_DIR / "invoices.json"
 
 MIN_QR_BALANCE = 0.1
 REFERRAL_BONUS = 0.2
