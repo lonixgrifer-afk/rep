@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Сначала копируем и устанавливаем зависимости из requirements.txt
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install "python-telegram-bot[job-queue]"
 
 # Принудительно ставим Playwright и качаем бинарники браузера вместе с системными либами
 RUN pip install playwright
