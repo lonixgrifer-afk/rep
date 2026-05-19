@@ -347,6 +347,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"✅ Выдано ${amount:.2f} @{u.get('username','')}. Баланс: ${float(user.get('balance',0)):.2f}")
 
 # --- Роутер инлайн кнопок ---
+# --- Роутер инлайн кнопок ---
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
@@ -366,42 +367,67 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.application.create_task(run_qr_process(chat_id, context))
 
     elif data == "balance:menu":
-        # Переводим пользователя в статус ожидания ввода суммы
         context.user_data["user_mode"] = "enter_balance"
-        
         kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
-        await query.edit_message_text(
-            f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n"
-            f"✍️ **Введите сумму в чат**:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        try:
+            await query.edit_message_text(
+                f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                await query.message.reply_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("balance:create:"):
         amount = float(data.split(":")[-1])
         ok, inv = create_invoice(chat_id, amount)
         if not ok:
-            await query.edit_message_text(f"❌ Не удалось создать счет: {inv.get('error','unknown')}", reply_markup=main_menu(chat_id))
+            try:
+                await query.edit_message_text(f"❌ Не удалось создать счет: {inv.get('error','unknown')}", reply_markup=main_menu(chat_id))
+            except Exception:
+                await query.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error','unknown')}", reply_markup=main_menu(chat_id))
             return
         pay_url = inv.get("pay_url") or inv.get("bot_invoice_url") or inv.get("mini_app_invoice_url", "")
         kb = [[InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
-        await query.edit_message_text(f"🚀 Ссылка на оплату ${amount:.2f} создана.\n\nБаланс пополнится автоматически сразу после оплаты. Можете не закрывать это меню.", reply_markup=InlineKeyboardMarkup(kb))
+        try:
+            await query.edit_message_text(f"🚀 Ссылка на оплату ${amount:.2f} создана.\n\nБаланс пополнится автоматически сразу после оплаты. Можете не закрывать это меню.", reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            await query.message.reply_text(f"🚀 Ссылка на оплату ${amount:.2f} создана.\n\nБаланс пополнится автоматически сразу после оплаты. Можете не закрывать это меню.", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "ref:menu":
         uname = (await context.bot.get_me()).username
         u = get_user(chat_id)
-        await query.edit_message_text(f"👥 Реферальная программа:\n• За каждого кто зайдет по ссылке будет засчитанно: ${REFERRAL_BONUS:.2f} \n• Успешные: {int(u.get('referrals',0))}\n\nСсылка:\nhttps://t.me/{uname}?start=ref_{chat_id}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]))
+        text_msg = f"👥 Реферальная программа:\n• За каждого кто зайдет по ссылке будет засчитанно: ${REFERRAL_BONUS:.2f} \n• Успешные: {int(u.get('referrals',0))}\n\nСсылка:\nhttps://t.me/{uname}?start=ref_{chat_id}"
+        kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
+        try:
+            await query.edit_message_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "session:list":
-        await query.edit_message_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
+        try:
+            await query.edit_message_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
+        except Exception:
+            await query.message.reply_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
+
     elif data == "session:show_list":
         sessions = chat_sessions(chat_id)
         if not sessions:
-            await query.edit_message_text("Список сессий пуст.", reply_markup=session_menu(chat_id))
+            try:
+                await query.edit_message_text("Список сессий пуст.", reply_markup=session_menu(chat_id))
+            except Exception:
+                await query.message.reply_text("Список сессий пуст.", reply_markup=session_menu(chat_id))
             return
         kb = [[InlineKeyboardButton(f"📁 Сессия №{i}", callback_data=f"sess_manage:{s.name}")] for i, s in enumerate(sessions, 1)]
         kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="session:list")])
-        await query.edit_message_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
+        try:
+            await query.edit_message_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                await query.message.reply_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
+
     elif data == "session:export_all":
         sessions = chat_sessions(chat_id)
         if not sessions:
@@ -414,10 +440,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии в одном архиве.")
         try: os.remove(zp)
         except OSError: pass
+
     elif data.startswith("sess_manage:"):
         fn = data.split(":", 1)[1]
         kb = [[InlineKeyboardButton("📜 Получить скрипт", callback_data=f"sess_get:{fn}")], [InlineKeyboardButton("🗑 Удалить сессию", callback_data=f"sess_del:{fn}")], [InlineKeyboardButton("⬅️ Назад", callback_data="session:show_list")]]
-        await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
+        try:
+            await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            await query.message.reply_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
+
     elif data.startswith("sess_get:"):
         fn = data.split(":", 1)[1]
         t = SESSIONS_DIR / fn
@@ -427,18 +458,29 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_document(document=bio, caption="Инструкция внутри файла.")
         else:
             await query.message.reply_text("Ошибка: файл не найден.")
+
     elif data.startswith("sess_del:"):
         fn = data.split(":", 1)[1]
         t = SESSIONS_DIR / fn
         if t.exists():
             os.remove(t)
-            await query.edit_message_text(f"✅ Сессия {fn} удалена.", reply_markup=session_menu(chat_id))
+            try:
+                await query.edit_message_text(f"✅ Сессия {fn} удалена.", reply_markup=session_menu(chat_id))
+            except Exception:
+                await query.message.reply_text(f"✅ Сессия {fn} удалена.", reply_markup=session_menu(chat_id))
         else:
-            await query.edit_message_text("❌ Сессия уже удалена или не существует.", reply_markup=session_menu(chat_id))
+            try:
+                await query.edit_message_text("❌ Сессия уже удалена или не существует.", reply_markup=session_menu(chat_id))
+            except Exception:
+                await query.message.reply_text("❌ Сессия уже удалена или не существует.", reply_markup=session_menu(chat_id))
 
     elif data == "admin:menu":
         if not is_admin(chat_id): return
-        await query.edit_message_text("🛠 Админ-панель:", reply_markup=admin_menu())
+        try:
+            await query.edit_message_text("🛠 Админ-панель:", reply_markup=admin_menu())
+        except Exception:
+            await query.message.reply_text("🛠 Админ-панель:", reply_markup=admin_menu())
+
     elif data == "admin:stats":
         if not is_admin(chat_id): return
         def get_today_stats() -> dict:
@@ -455,22 +497,28 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         elif row.get("event") == "token_created": tokens_count += 1
             return {"date": today, "users_count": len(load_users()), "topups_sum": round(topups_sum, 2), "tokens_count": tokens_count}
         st = get_today_stats()
-        await query.edit_message_text(f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополнения: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}", reply_markup=admin_menu())
+        text_stats = f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополниния: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}"
+        try:
+            await query.edit_message_text(text_stats, reply_markup=admin_menu())
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                await query.message.reply_text(text_stats, reply_markup=admin_menu())
+
     elif data == "admin:broadcast":
         if not is_admin(chat_id): return
         context.user_data["admin_mode"] = "broadcast"
         await query.message.reply_text("Введите текст для рассылки.")
+
     elif data == "admin:give_balance":
         if not is_admin(chat_id): return
         context.user_data["admin_mode"] = "give_balance"
         await query.message.reply_text("Введите: <username> <сумма>")
+
     elif data == "back_to_main":
         context.user_data.pop("user_mode", None)
         try:
-            # Пробуем красиво отредактировать сообщение
             await query.edit_message_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
         except Exception as e:
-            # Если Telegram ругается, что сообщение то же самое, просто отправляем новое меню, чтобы бот не зависал
             if "Message is not modified" in str(e):
                 await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
             else:
