@@ -169,7 +169,7 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("🗂 Мои сессии", callback_data="session:list")
         ],
         [
-            InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance:menu"),
+            InlineKeyboardButton("💳 Пополнити баланс", callback_data="balance:menu"),
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
         ]
     ]
@@ -217,21 +217,17 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 "--disable-gpu",
                 "--no-first-run",
                 "--no-zygote",
-                "--single-process" # Снижает потребление памяти в контейнере Railway
+                "--single-process"
             ]
         )
         
         ctx = await browser.new_context(viewport={"width": 400, "height": 600})
         page = await ctx.new_page()
         
-        # Блокируем загрузку лишнего мусора (шрифты, стили, сторонние картинки), оставляя только нужное для QR
         await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] and "qr" not in route.request.url else route.continue_())
         
         try:
-            # wait_until="commit" означает "как только сервер ответил", не дожидаясь загрузки страницы
             await page.goto(BASE_URL, wait_until="commit", timeout=30000)
-            
-            # Ждём появления самого селектора QR-кода, а не всей сети
             qr_handle = await page.wait_for_selector("canvas, img[src*='qr'], div[class*='qr'], svg", timeout=15000, state="visible")
             
             if qr_handle:
@@ -241,7 +237,6 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 
             await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
             
-            # Ожидание авторизации оставляем прежним
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
@@ -304,7 +299,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data.pop("user_mode", None)
         ok, inv = create_invoice(chat_id, amount)
         if not ok:
-            await update.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error', 'unknown')}", reply_markup=main_menu(chat_id))
+            welcome_text, reply_kb = main_menu_content(chat_id)
+            await update.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error', 'unknown')}", reply_markup=reply_kb)
             return
             
         pay_url = inv.get("pay_url") or inv.get("bot_invoice_url") or inv.get("mini_app_invoice_url", "")
@@ -355,11 +351,13 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "qr:get":
         balance = float(get_user(chat_id).get("balance", 0.0))
         if balance < MIN_QR_BALANCE:
-            await query.message.reply_text(f"❌ Недостаточно средств. Нужно минимум ${MIN_QR_BALANCE:.2f}. Баланс: ${balance:.2f}", reply_markup=main_menu(chat_id))
+            welcome_text, reply_kb = main_menu_content(chat_id)
+            await query.message.reply_text(f"❌ Недостаточно средств. Нужно минимум ${MIN_QR_BALANCE:.2f}. Баланс: ${balance:.2f}", reply_markup=reply_kb)
             return
         ok, new_balance = charge_for_qr(chat_id)
         if not ok:
-            await query.message.reply_text(f"❌ Недостаточно средств. Баланс: ${new_balance:.2f}", reply_markup=main_menu(chat_id))
+            welcome_text, reply_kb = main_menu_content(chat_id)
+            await query.message.reply_text(f"❌ Недостаточно средств. Баланс: ${new_balance:.2f}", reply_markup=reply_kb)
             return
         await query.message.reply_text(f"✅ Списано ${QR_PRICE:.2f}. Остаток: ${new_balance:.2f}\n🚀 Запускаю получение QR...")
         
@@ -499,11 +497,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Твой Telegram ID. Бот ответит только тебе!
     YOUR_ADMIN_ID = 8779583069  
     
     if update.effective_user.id != YOUR_ADMIN_ID:
-        return # Если пишет посторонний, бот просто молчит
+        return 
 
     print(f"!!! Кнопка /getdata нажата создателем бота !!!")
     status_msg = await update.message.reply_text("🤖 Собираю архив папки данных из Volume, подожди...")
@@ -516,7 +513,6 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             await status_msg.edit_text("❌ Папка /app/sessions не найдена.")
             return
 
-        # Упаковываем данные во временную папку
         shutil.make_archive(archive_name, 'zip', target_dir)
         zip_path = f"{archive_name}.zip"
 
@@ -537,7 +533,7 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при создании архива: {e}")
 
-# --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
+# --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     invoices = load_invoices()
     active_ids = [k for k, v in invoices.items() if not v.get("credited")]
@@ -566,11 +562,12 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             updated = True
 
             try:
+                _, reply_kb = main_menu_content(chat_id)
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"💳 **Баланс успешно пополнен!**\n\nЗачислено: `${amount:.2f}`\nТекущий баланс: `${float(user.get('balance', 0.0)):.2f}`",
                     parse_mode="Markdown",
-                    reply_markup=main_menu(chat_id)
+                    reply_markup=reply_kb
                 )
                 if ref_chat_id:
                     ref_user = get_user(int(ref_chat_id))
