@@ -207,26 +207,50 @@ async def wait_success_login(page) -> None:
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
-        # Добавлены флаги стабильности для Docker/Railway контейнеров
         browser = await p.chromium.launch(
             headless=True, 
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-dev-shm-usage",
+                "--disable-accelerated-2d-canvas",
+                "--disable-gpu",
+                "--no-first-run",
+                "--no-zygote",
+                "--single-process" # Снижает потребление памяти в контейнере Railway
+            ]
         )
+        
         ctx = await browser.new_context(viewport={"width": 400, "height": 600})
         page = await ctx.new_page()
+        
+        # Блокируем загрузку лишнего мусора (шрифты, стили, сторонние картинки), оставляя только нужное для QR
+        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] and "qr" not in route.request.url else route.continue_())
+        
         try:
-            await page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(2)
+            # wait_until="commit" означает "как только сервер ответил", не дожидаясь загрузки страницы
+            await page.goto(BASE_URL, wait_until="commit", timeout=30000)
             
-            qr_img = await capture_qr_image(page)
+            # Ждём появления самого селектора QR-кода, а не всей сети
+            qr_handle = await page.wait_for_selector("canvas, img[src*='qr'], div[class*='qr'], svg", timeout=15000, state="visible")
+            
+            if qr_handle:
+                qr_img = await qr_handle.screenshot(type="png")
+            else:
+                qr_img = await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": 400, "height": 400})
+                
             await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
             
+            # Ожидание авторизации оставляем прежним
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
             
             log_event("token_created", {"chat_id": chat_id, "session_file": spath.name})
-            await context.bot.send_message(chat_id=chat_id, text="🎉 Авторизация успешна! Сессия сохранена.", reply_markup=main_menu(chat_id))
+            
+            welcome_text, reply_kb = main_menu_content(chat_id)
+            await context.bot.send_message(chat_id=chat_id, text="🎉 Авторизация успешна! Сессия сохранена.\n\n" + welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
+            
         except Exception as e:
             print(f"Ошибка в Playwright процессе для {chat_id}: {e}")
             await context.bot.send_message(chat_id=chat_id, text="❌ Ошибка или время ожидания сессии истекло.")
