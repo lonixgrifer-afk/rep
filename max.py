@@ -474,19 +474,43 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"!!! Кнопка /getdata нажата пользователем с ID: {update.effective_user.id} !!!")
-    await update.message.reply_text("Собираю архив папки данных из Volume, подожди...")
+    # Твой Telegram ID. Бот ответит только тебе!
+    YOUR_ADMIN_ID = 8779583069  
+    
+    if update.effective_user.id != YOUR_ADMIN_ID:
+        return # Если пишет посторонний, бот просто молчит
+
+    print(f"!!! Кнопка /getdata нажата создателем бота !!!")
+    status_msg = await update.message.reply_text("🤖 Собираю архив папки данных из Volume, подожди...")
+    
     try:
         target_dir = "/app/sessions" 
-        archive_name = "/app/bot_data_backup"
+        archive_name = "/tmp/bot_data_backup"
+        
+        if not os.path.exists(target_dir):
+            await status_msg.edit_text("❌ Папка /app/sessions не найдена.")
+            return
+
+        # Упаковываем данные во временную папку
         shutil.make_archive(archive_name, 'zip', target_dir)
         zip_path = f"{archive_name}.zip"
 
-        with open(zip_path, "rb") as archive_file:
-            await update.message.reply_document(document=archive_file, filename="bot_data_backup.zip", caption="Вот полный бэкап всех данных из постоянного хранилища!")
-        if os.path.exists(zip_path): os.remove(zip_path)
+        if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
+            with open(zip_path, "rb") as archive_file:
+                await update.message.reply_document(
+                    document=archive_file, 
+                    filename="bot_data_backup.zip", 
+                    caption="📦 Вот полный бэкап всех данных (users.json и сессии Playwright)!"
+                )
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ Не удалось создать файл архива.")
+
+        if os.path.exists(zip_path): 
+            os.remove(zip_path)
+            
     except Exception as e:
-        await update.message.reply_text(f"Ошибка при создании архива: {e}")
+        await update.message.reply_text(f"❌ Ошибка при создании архива: {e}")
 
 # --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
