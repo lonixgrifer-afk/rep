@@ -171,12 +171,14 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
         [
             InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance:menu"),
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
+        ],
+        [
+            InlineKeyboardButton("🎁 Бонус ($0.30)", callback_data="user:bonus")  # <-- Новая кнопка в самом низу
         ]
     ]
     if is_admin(chat_id):
         rows.append([InlineKeyboardButton("🛠 Admin-панель", callback_data="admin:menu")])
     return text, InlineKeyboardMarkup(rows)
-
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("📊 Статистика за сегодня", callback_data="admin:stats")], [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], [InlineKeyboardButton("💸 Выдать баланс", callback_data="admin:give_balance")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
