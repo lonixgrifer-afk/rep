@@ -169,7 +169,7 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("🗂 Мои сессии", callback_data="session:list")
         ],
         [
-            InlineKeyboardButton("💳 Пополнити баланс", callback_data="balance:menu"),
+            InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance:menu"),
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
         ]
     ]
