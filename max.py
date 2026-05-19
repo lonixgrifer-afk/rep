@@ -467,10 +467,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "back_to_main":
         context.user_data.pop("user_mode", None)
         try:
-            await query.edit_message_text("Выберите действие:", reply_markup=main_menu(chat_id))
+            # Пробуем красиво отредактировать сообщение
+            await query.edit_message_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
         except Exception as e:
-            if "Message is not modified" not in str(e):
-                raise e
+            # Если Telegram ругается, что сообщение то же самое, просто отправляем новое меню, чтобы бот не зависал
+            if "Message is not modified" in str(e):
+                await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
+            else:
+                print(f"Ошибка в back_to_main: {e}")
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Этот лог отобразится во вкладке Logs на Railway
