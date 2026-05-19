@@ -473,9 +473,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 raise e
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Защита по Telegram ID
-    if update.effective_user.id != 8779583069: 
-        return
+    # Этот лог отобразится во вкладке Logs на Railway
+    print(f"!!! Кнопка /getdata нажата пользователем с ID: {update.effective_user.id} !!!")
 
     await update.message.reply_text("Собираю архив папки данных из Volume, подожди...")
 
@@ -487,12 +486,12 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         shutil.make_archive(archive_name, 'zip', target_dir)
         zip_path = f"{archive_name}.zip"
 
-        # Отправляем архив в чат с помощью встроенных средств python-telegram-bot
+        # Отправляем архив в чат
         with open(zip_path, "rb") as archive_file:
             await update.message.reply_document(
                 document=archive_file,
                 filename="bot_data_backup.zip",
-                caption="Вот полный бэкап всех данных (сессии, пользователи, инвойсы) из постоянного хранилища!"
+                caption="Вот полный бэкап всех данных из постоянного хранилища!"
             )
         
         # Удаляем временный файл
@@ -500,6 +499,7 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             os.remove(zip_path)
 
     except Exception as e:
+        print(f"Ошибка архивации: {e}")
         await update.message.reply_text(f"Ошибка при создании архива: {e}")
 
 # --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
@@ -564,17 +564,16 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Регистрация стандартных хэндлеров
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("admin", admin_cmd))
-    
-    # !!! ДОБАВЛЯЕМ СТРОКУ НИЖЕ, ЧТОБЫ КОМАНДА /getdata ЗАРАБОТАЛА !!!
+    # 1. Сначала регистрируем команду выгрузки данных
     app.add_handler(CommandHandler("getdata", export_data_archive))
     
+    # 2. Затем все остальные стандартные команды и роутеры
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    # Настройка фонового джоба (Проверка раз в 7 секунд)
+    # Настройка фонового джоба проверки оплаты (раз в 7 секунд)
     job_queue = app.job_queue
     job_queue.run_repeating(check_invoices_job, interval=7, first=5)
 
