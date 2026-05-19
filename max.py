@@ -327,7 +327,11 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                         print(f"[Ошибка] Не удалось отправить лог админу {admin_id}: {admin_err}")
 
         except Exception as e:
-            # Тут твой стандартный обработчик ошибок (например, логгирование или вывод "Ошибка авторизации")
+            print(f"[Критическая ошибка] В процессе QR произошел сбой: {e}")
+            try:
+                await status_msg.edit_text("❌ Произошла ошибка при авторизации. Попробуйте еще раз.")
+            except Exception:
+                pass
 
 # --- Команды Telegram ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
