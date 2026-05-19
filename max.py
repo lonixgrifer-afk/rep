@@ -251,12 +251,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text("✅ Реферальный код применен.")
         except ValueError: pass
 
-    balance = float(user.get("balance", 0.0))
-    welcome_text = (
-        f"💳 **Ваш баланс:** `${balance:.2f}`\n\n"
-        f"👇 Выберите нужное действие в меню ниже:"
-    )
-    await update.message.reply_text(text=welcome_text, parse_mode="Markdown", reply_markup=main_menu(chat_id))
+    welcome_text, reply_kb = main_menu_content(chat_id)
+    await update.message.reply_text(text=welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
         
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_chat.id):
@@ -472,10 +468,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "back_to_main":
         context.user_data.pop("user_mode", None)
+        welcome_text, reply_kb = main_menu_content(chat_id)
         try:
-            await query.edit_message_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
+            await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
         except Exception:
-            await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
+            await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Твой Telegram ID. Бот ответит только тебе!
