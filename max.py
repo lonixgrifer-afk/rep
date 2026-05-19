@@ -567,6 +567,10 @@ def main() -> None:
     # Регистрация стандартных хэндлеров
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
+    
+    # !!! ДОБАВЛЯЕМ СТРОКУ НИЖЕ, ЧТОБЫ КОМАНДА /getdata ЗАРАБОТАЛА !!!
+    app.add_handler(CommandHandler("getdata", export_data_archive))
+    
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
@@ -576,7 +580,3 @@ def main() -> None:
 
     print("Бот запущен в режиме Polling...")
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
