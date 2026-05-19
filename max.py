@@ -8,11 +8,6 @@ import shutil
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-import shutil
-import os
-from aiogram import types
-from aiogram.filters import Command
-from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -258,42 +253,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"👇 Выберите нужное действие в меню ниже:"
     )
     await update.message.reply_text(text=welcome_text, parse_mode="Markdown", reply_markup=main_menu(chat_id))
-
-@router.message(Command("getdata"))
-async def cmd_get_data(message: types.Message):
-    # Вставь свой Telegram ID заместо цифр 123456789
-    YOUR_ADMIN_ID = 8779583069
-    
-    # Если пишет не админ — бот просто игнорирует команду
-    if message.from_user.id != YOUR_ADMIN_ID:
-        return 
-
-    status_msg = await message.answer("🤖 Собираю бэкап базы данных и сессий, подожди...")
-    zip_path = Path("/tmp/bot_data_backup")
-    
-    try:
-        if not DATA_DIR.exists():
-            await status_msg.edit_text("❌ Папка с данными не найдена.")
-            return
-
-        # Создаем архив
-        shutil.make_archive(str(zip_path), 'zip', str(DATA_DIR))
-        full_zip_file = Path(f"{zip_path}.zip")
-
-        if full_zip_file.exists() and full_zip_file.stat().st_size > 0:
-            # Отправляем архив тебе в чат
-            await message.reply_document(
-                document=types.FSInputFile(str(full_zip_file)),
-                caption="📦 Полный бэкап данных (users.json и сессии Playwright)."
-            )
-            # Удаляем временный файл с сервера
-            os.remove(full_zip_file)
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось создать файл архива.")
-            
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка при создании бэкапа: {e}")
         
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_chat.id):
