@@ -157,8 +157,12 @@ def session_path(chat_id: int) -> Path: return SESSIONS_DIR / f"session_{chat_id
 def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f"session_{chat_id}_*.json"))
 
 # --- Меню ---
-def main_menu(chat_id: int) -> InlineKeyboardMarkup:
+def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
     balance = float(get_user(chat_id).get("balance", 0.0))
+    text = (
+        f"💳 **Ваш баланс:** `${balance:.2f}`\n\n"
+        f"👇 Выберите нужное действие в меню ниже:"
+    )
     rows = [
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
@@ -170,8 +174,8 @@ def main_menu(chat_id: int) -> InlineKeyboardMarkup:
         ]
     ]
     if is_admin(chat_id):
-        rows.append([InlineKeyboardButton("🛠 Админ-панель", callback_data="admin:menu")])
-    return InlineKeyboardMarkup(rows)
+        rows.append([InlineKeyboardButton("🛠 Admin-панель", callback_data="admin:menu")])
+    return text, InlineKeyboardMarkup(rows)
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("📊 Статистика за сегодня", callback_data="admin:stats")], [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], [InlineKeyboardButton("💸 Выдать баланс", callback_data="admin:give_balance")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
