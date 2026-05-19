@@ -532,6 +532,54 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
 
+elif data == "user:bonus":
+        user = get_user(chat_id)
+        last_bonus_str = user.get("last_bonus_time")
+        now = datetime.utcnow()
+        
+        can_claim = True
+        remaining_time_str = ""
+        
+        if last_bonus_str:
+            try:
+                last_bonus_time = datetime.strptime(last_bonus_str, "%Y-%m-%dT%H:%M:%SZ")
+                # Вычисляем разницу во времени
+                diff = now - last_bonus_time
+                diff_hours = diff.total_seconds() / 3600
+                
+                if diff_hours < 48:
+                    can_claim = False
+                    # Считаем, сколько осталось подождать
+                    seconds_left = int((48 * 3600) - diff.total_seconds())
+                    hours = seconds_left // 3600
+                    minutes = (seconds_left % 3600) // 60
+                    remaining_time_str = f"{hours}ч. {minutes}мин."
+            except Exception:
+                pass # Если дата почему-то побилась, разрешаем забрать бонус
+
+        if can_claim:
+            # Начисляем 0.3 доллара через твою готовую функцию
+            user_updated, _ = add_balance(chat_id, 0.30, source="daily_bonus")
+            # Записываем текущее время получения
+            user_updated["last_bonus_time"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            update_user(chat_id, user_updated)
+            
+            # Получаем обновленное меню со свежим балансом
+            welcome_text, reply_kb = main_menu_content(chat_id)
+            
+            await query.message.reply_text(
+                f"🎁 **Поздравляем!**\nВы успешно забрали бонус `+$0.30`!\n\nСледующий бонус будет доступен через 48 часов."
+            )
+            # Обновляем главное меню, чтобы баланс сразу изменился визуально
+            try:
+                await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
+            except Exception:
+                pass
+        else:
+            await query.message.reply_text(
+                f"❌ **Вы уже забирали бонус!**\n\nПриходите позже. До получения следующего бонуса осталось: **{remaining_time_str}**."
+            )
+            
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     YOUR_ADMIN_ID = 8779583069  
     
