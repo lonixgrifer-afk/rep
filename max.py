@@ -561,7 +561,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             # ИЗМЕНЕНО: Текст уведомления изменен на 24 часа
             await query.message.reply_text(
-                f"🎁 **Поздравляем!**\nВы успешно забрали бонус `+$0.30`!\n\nСледующий бонус будет доступен через 24 часа."
+                f"🎁 Поздравляем!\nВы успешно забрали бонус +$0.30!\n\nСледующий бонус будет доступен через 24 часа."
             )
             try:
                 await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
@@ -569,7 +569,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         else:
             await query.message.reply_text(
-                f"❌ **Вы уже забирали бонус!**\n\nПриходите позже. До получения следующего бонуса осталось: **{remaining_time_str}**."
+                f"❌ Вы уже забирали бонус!\n\nПриходите позже. До получения следующего бонуса осталось: {remaining_time_str}."
             )
             
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
