@@ -4,6 +4,9 @@ import urllib.request
 import zipfile
 import urllib.parse
 import asyncio
+import shutil
+import os
+from telegram import FSInputFile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -466,6 +469,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("user_mode", None)  # Сбрасываем режим ввода
         await query.edit_message_text("Выберите действие:", reply_markup=main_menu(chat_id))
 
+async def export_data_archive(update, context):
+    # Твой Telegram ID для защиты, чтобы никто другой не скачал базу
+    # Убедись, что этот ID совпадает с твоим (на скриншоте было 8779583069)
+    if update.effective_user.id != 8779583069: 
+        return
+
+    await update.message.reply_text("Собираю архив папки data, подожди...")
+
+    try:
+        # Указываем папку, в которой лежит всё: и сессии, и юзеры
+        target_dir = "data" 
+        archive_name = "bot_data_backup"
+
+        # Создаем zip-архив из всей папки data
+        shutil.make_archive(archive_name, 'zip', target_dir)
+
+        # Отправляем архив в чат
+        await update.message.reply_document(
+            document=FSInputFile(f"{archive_name}.zip"),
+            caption="Вот полный бэкап папки data (сессии, юзеры, инвойсы)!"
+        )
+        
+        # Удаляем временный zip-файл, чтобы он не занимал место в контейнере
+        os.remove(f"{archive_name}.zip")
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при создании архива: {e}")
+
+# Добавь эту строчку вниз к остальным хендлерам (например, под командой /start)
+app.add_handler(CommandHandler("getdata", export_data_archive))
 
 # --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
