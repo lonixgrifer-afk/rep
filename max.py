@@ -12,9 +12,9 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-# Конфигурация
-BOT_TOKEN = "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys"
-CRYPTO_PAY_TOKEN = "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy"
+# Конфигурация (замени значения или используй os.getenv)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys")
+CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy")
 CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
 
@@ -68,7 +68,6 @@ def crypto_api_call(method: str, payload: dict) -> dict:
         method="POST",
         headers={
             "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN,
-            # Добавляем User-Agent, чтобы Cloudflare думал, что запрос идет от обычного браузера
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         },
     )
@@ -160,25 +159,18 @@ def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f
 # --- Меню ---
 def main_menu(chat_id: int) -> InlineKeyboardMarkup:
     balance = float(get_user(chat_id).get("balance", 0.0))
-    
-    # Базовая сетка для всех пользователей
     rows = [
-        # Первый ряд: Получить QR (слева) и Мои сессии (справа)
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
             InlineKeyboardButton("🗂 Мои сессии", callback_data="session:list")
         ],
-        # Второй ряд: Пополнить баланс (слева) и Рефералка (справа)
         [
-            InlineKeyboardButton(f"💳 Пополнить баланс", callback_data="balance:menu"),
+            InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance:menu"),
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
         ]
     ]
-    
-    # Третий ряд: Динамически добавляется В САМЫЙ НИЗ только для админов
     if is_admin(chat_id):
         rows.append([InlineKeyboardButton("🛠 Админ-панель", callback_data="admin:menu")])
-        
     return InlineKeyboardMarkup(rows)
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -211,20 +203,29 @@ async def wait_success_login(page) -> None:
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        # Добавлены флаги стабильности для Docker/Railway контейнеров
+        browser = await p.chromium.launch(
+            headless=True, 
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
         ctx = await browser.new_context(viewport={"width": 400, "height": 600})
         page = await ctx.new_page()
         try:
             await page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
-            await context.bot.send_photo(chat_id=chat_id, photo=await capture_qr_image(page), caption="✅ QR готов! Сканируй для входа.")
+            
+            qr_img = await capture_qr_image(page)
+            await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
+            
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
+            
             log_event("token_created", {"chat_id": chat_id, "session_file": spath.name})
             await context.bot.send_message(chat_id=chat_id, text="🎉 Авторизация успешна! Сессия сохранена.", reply_markup=main_menu(chat_id))
-        except Exception:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Ошибка или время истекло.")
+        except Exception as e:
+            print(f"Ошибка в Playwright процессе для {chat_id}: {e}")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Ошибка или время ожидания сессии истекло.")
         finally:
             await browser.close()
 
@@ -233,12 +234,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
-    # Сохраняем username пользователя, если он есть
     if update.effective_user and update.effective_user.username:
         user["username"] = update.effective_user.username
         update_user(chat_id, user)
         
-    # Проверяем реферальный код
     if context.args and context.args[0].startswith("ref_"):
         try:
             ref_id = int(context.args[0].replace("ref_", ""))
@@ -248,20 +247,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text("✅ Реферальный код применен.")
         except ValueError: pass
 
-    # Вытаскиваем баланс для текста сообщения
     balance = float(user.get("balance", 0.0))
-
-    # Красивое сообщение с балансом при старте
     welcome_text = (
         f"💳 **Ваш баланс:** `${balance:.2f}`\n\n"
         f"👇 Выберите нужное действие в меню ниже:"
     )
-
-    await update.message.reply_text(
-        text=welcome_text, 
-        parse_mode="Markdown", 
-        reply_markup=main_menu(chat_id)
-    )
+    await update.message.reply_text(text=welcome_text, parse_mode="Markdown", reply_markup=main_menu(chat_id))
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_chat.id):
@@ -273,50 +264,35 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
     
-    # --- ЛОГИКА ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ (Ввод своей суммы) ---
     user_mode = context.user_data.get("user_mode")
     if user_mode == "enter_balance":
-        # Заменяем запятую на точку, если юзер ввел например "0,5"
         text_clean = text.replace(",", ".")
         try:
             amount = float(text_clean)
             if amount <= 0:
                 await update.message.reply_text("❌ Сумма должна быть больше нуля. Введите корректное число:")
                 return
-            # Округляем до 2 знаков после запятой
             amount = round(amount, 2)
         except ValueError:
             await update.message.reply_text("❌ Непонятная сумма. Введите число (например: 0.5 или 10):")
             return
         
-        # Сбрасываем режим ожидания ввода
         context.user_data.pop("user_mode", None)
-        
-        # Создаем инвойс в Crypto Bot на введенную сумму
         ok, inv = create_invoice(chat_id, amount)
         if not ok:
-            await update.message.reply_text(
-                f"❌ Не удалось создать счет: {inv.get('error', 'unknown')}", 
-                reply_markup=main_menu(chat_id)
-            )
+            await update.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error', 'unknown')}", reply_markup=main_menu(chat_id))
             return
             
         pay_url = inv.get("pay_url") or inv.get("bot_invoice_url") or inv.get("mini_app_invoice_url", "")
-        kb = [
-            [InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)], 
-            [InlineKeyboardButton("⬅️ Главное меню", callback_data="back_to_main")]
-        ]
+        kb = [[InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)], [InlineKeyboardButton("⬅️ Главное меню", callback_data="back_to_main")]]
         await update.message.reply_text(
-            f"🚀 Ссылка на оплату **${amount:.2f}** успешно создана!\n\n"
-            f"Баланс пополнится автоматически сразу после оплаты.", 
+            f"🚀 Ссылка на оплату **${amount:.2f}** успешно создана!\n\nБаланс пополнится автоматически сразу после оплаты.", 
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(kb)
         )
         return
 
-    # --- ЛОГИКА АДМИН-ПАНЕЛИ (Оставляем как было) ---
-    if not is_admin(chat_id): 
-        return
+    if not is_admin(chat_id): return
         
     admin_mode = context.user_data.get("admin_mode")
     if admin_mode == "broadcast":
@@ -346,8 +322,6 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data.pop("admin_mode", None)
         await update.message.reply_text(f"✅ Выдано ${amount:.2f} @{u.get('username','')}. Баланс: ${float(user.get('balance',0)):.2f}")
 
-# --- Роутер инлайн кнопок ---
-# --- Роутер инлайн кнопок ---
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
@@ -364,36 +338,17 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(f"❌ Недостаточно средств. Баланс: ${new_balance:.2f}", reply_markup=main_menu(chat_id))
             return
         await query.message.reply_text(f"✅ Списано ${QR_PRICE:.2f}. Остаток: ${new_balance:.2f}\n🚀 Запускаю получение QR...")
+        
+        # Запускаем в бекграунде
         context.application.create_task(run_qr_process(chat_id, context))
 
     elif data == "balance:menu":
         context.user_data["user_mode"] = "enter_balance"
         kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
         try:
-            await query.edit_message_text(
-                f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.message.reply_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data.startswith("balance:create:"):
-        amount = float(data.split(":")[-1])
-        ok, inv = create_invoice(chat_id, amount)
-        if not ok:
-            try:
-                await query.edit_message_text(f"❌ Не удалось создать счет: {inv.get('error','unknown')}", reply_markup=main_menu(chat_id))
-            except Exception:
-                await query.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error','unknown')}", reply_markup=main_menu(chat_id))
-            return
-        pay_url = inv.get("pay_url") or inv.get("bot_invoice_url") or inv.get("mini_app_invoice_url", "")
-        kb = [[InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
-        try:
-            await query.edit_message_text(f"🚀 Ссылка на оплату ${amount:.2f} создана.\n\nБаланс пополнится автоматически сразу после оплаты. Можете не закрывать это меню.", reply_markup=InlineKeyboardMarkup(kb))
+            await query.edit_message_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         except Exception:
-            await query.message.reply_text(f"🚀 Ссылка на оплату ${amount:.2f} создана.\n\nБаланс пополнится автоматически сразу после оплаты. Можете не закрывать это меню.", reply_markup=InlineKeyboardMarkup(kb))
+            await query.message.reply_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "ref:menu":
         uname = (await context.bot.get_me()).username
@@ -402,9 +357,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
         try:
             await query.edit_message_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "session:list":
         try:
@@ -424,9 +378,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="session:list")])
         try:
             await query.edit_message_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.message.reply_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            await query.message.reply_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "session:export_all":
         sessions = chat_sessions(chat_id)
@@ -437,7 +390,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             for s in sessions: zf.write(s, arcname=s.name)
         with open(zp, "rb") as f:
-            await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии в одном архиве.")
+            await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии in одном архиве.")
         try: os.remove(zp)
         except OSError: pass
 
@@ -500,14 +453,13 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text_stats = f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополниния: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}"
         try:
             await query.edit_message_text(text_stats, reply_markup=admin_menu())
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.message.reply_text(text_stats, reply_markup=admin_menu())
+        except Exception:
+            await query.message.reply_text(text_stats, reply_markup=admin_menu())
 
     elif data == "admin:broadcast":
         if not is_admin(chat_id): return
         context.user_data["admin_mode"] = "broadcast"
-        await query.message.reply_text("Введите текст для рассылки.")
+        await query.message.reply_text("Введите text для рассылки.")
 
     elif data == "admin:give_balance":
         if not is_admin(chat_id): return
@@ -518,56 +470,32 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("user_mode", None)
         try:
             await query.edit_message_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
-            else:
-                print(f"Ошибка в back_to_main: {e}")
+        except Exception:
+            await query.message.reply_text("👇 Выберите нужное действие в меню ниже:", reply_markup=main_menu(chat_id))
 
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Этот лог отобразится во вкладке Logs на Railway
     print(f"!!! Кнопка /getdata нажата пользователем с ID: {update.effective_user.id} !!!")
-
     await update.message.reply_text("Собираю архив папки данных из Volume, подожди...")
-
     try:
         target_dir = "/app/sessions" 
         archive_name = "/app/bot_data_backup"
-
-        # Создаем zip-архив
         shutil.make_archive(archive_name, 'zip', target_dir)
         zip_path = f"{archive_name}.zip"
 
-        # Отправляем архив в чат
         with open(zip_path, "rb") as archive_file:
-            await update.message.reply_document(
-                document=archive_file,
-                filename="bot_data_backup.zip",
-                caption="Вот полный бэкап всех данных из постоянного хранилища!"
-            )
-        
-        # Удаляем временный файл
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
-
+            await update.message.reply_document(document=archive_file, filename="bot_data_backup.zip", caption="Вот полный бэкап всех данных из постоянного хранилища!")
+        if os.path.exists(zip_path): os.remove(zip_path)
     except Exception as e:
-        print(f"Ошибка архивации: {e}")
         await update.message.reply_text(f"Ошибка при создании архива: {e}")
 
 # --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     invoices = load_invoices()
-    # Фильтруем только те счета, которые созданы, но еще не зачислены
     active_ids = [k for k, v in invoices.items() if not v.get("credited")]
-    
-    if not active_ids:
-        return
+    if not active_ids: return
 
-    # Запрашиваем статусы пачкой (максимум по 100 шт за раз, согласно лимитам API)
-    # Передаем id счетов через запятую
     resp = crypto_api_call("getInvoices", {"invoice_ids": ",".join(active_ids)})
-    if not resp.get("ok"):
-        return
+    if not resp.get("ok"): return
 
     items = resp.get("result", {}).get("items", [])
     updated = False
@@ -578,19 +506,16 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         if status == "paid" and invoice_id in invoices:
             local = invoices[invoice_id]
-            if local.get("credited"):
-                continue
+            if local.get("credited"): continue
                 
             chat_id = int(local["chat_id"])
             amount = float(local["amount"])
 
-            # Начисляем средства
             user, ref_chat_id = add_balance(chat_id, amount, source="cryptopay_polling")
             local["credited"] = True
             invoices[invoice_id] = local
             updated = True
 
-            # Уведомляем пользователя
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -598,7 +523,6 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                     reply_markup=main_menu(chat_id)
                 )
-                # Если это первая оплата и есть реферер — платим ему бонус
                 if ref_chat_id:
                     ref_user = get_user(int(ref_chat_id))
                     await context.bot.send_message(
@@ -608,26 +532,22 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
             except Exception as e:
                 print(f"Не удалось отправить уведомление для {chat_id}: {e}")
-
-    if updated:
-        save_invoices(invoices)
-
+    if updated: save_invoices(invoices)
 
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # 1. Сначала регистрируем команду выгрузки данных
     app.add_handler(CommandHandler("getdata", export_data_archive))
-    
-    # 2. Затем все остальные стандартные команды и роутеры
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    # Настройка фонового джоба проверки оплаты (раз в 7 секунд)
     job_queue = app.job_queue
     job_queue.run_repeating(check_invoices_job, interval=7, first=5)
 
     print("Бот запущен в режиме Polling...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
