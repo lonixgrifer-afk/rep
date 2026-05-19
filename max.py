@@ -206,6 +206,9 @@ async def wait_success_login(page) -> None:
 
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
+    
+    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Подключаюсь к платформе...")
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True, 
@@ -221,22 +224,49 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
         
-        ctx = await browser.new_context(viewport={"width": 400, "height": 600})
+        ctx = await browser.new_context(viewport={"width": 500, "height": 600})
         page = await ctx.new_page()
         
-        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] and "qr" not in route.request.url else route.continue_())
+        # Блокируем только тяжелые картинки и медиа. CSS (stylesheet) НЕ БЛОКИРУЕМ, так как без него едет верстка и ломаются селекторы!
+        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media"] and "qr" not in route.request.url else route.continue_())
         
         try:
-            await page.goto(BASE_URL, wait_until="commit", timeout=30000)
-            qr_handle = await page.wait_for_selector("canvas, img[src*='qr'], div[class*='qr'], svg", timeout=15000, state="visible")
+            await status_msg.edit_text("⏳ Загружаю страницу авторизации...")
+            # Меняем wait_until на "domcontentloaded", чтобы структура страницы точно появилась
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=40000)
+            
+            await status_msg.edit_text("⏳ Ищу QR-код на странице...")
+            
+            qr_handle = None
+            # Пробуем разные селекторы, которые могут отвечать за QR-код
+            for selector in ["canvas", "img[src*='qr']", "div[class*='qr']", "[id*='qr']", "svg"]:
+                try:
+                    qr_handle = await page.wait_for_selector(selector, timeout=5000, state="visible")
+                    if qr_handle:
+                        print(f"[Успех] Найдено по селектору: {selector}")
+                        break
+                except Exception:
+                    continue
             
             if qr_handle:
+                await status_msg.edit_text("⏳ Генерирую изображение QR...")
                 qr_img = await qr_handle.screenshot(type="png")
+                await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
+                await status_msg.delete()
             else:
-                qr_img = await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": 400, "height": 400})
+                # Если QR не найден, делаем скриншот всей страницы для диагностики
+                print(f"[Ошибка] QR-код не найден для пользователя {chat_id}. Делаю диагностический скриншот.")
+                await status_msg.edit_text("⚠️ Ошибка: Элемент QR-кода не найден. Отправляю снимок экрана для проверки...")
                 
-            await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
+                debug_screenshot = await page.screenshot(type="png")
+                await context.bot.send_photo(
+                    chat_id=chat_id, 
+                    photo=debug_screenshot, 
+                    caption="🔎 Бот не увидел QR. Вот что отображается на странице вместо него (возможно там капча или Cloudflare)."
+                )
+                return
             
+            # Ожидание авторизации
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
@@ -248,10 +278,14 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             
         except Exception as e:
             print(f"Ошибка в Playwright процессе для {chat_id}: {e}")
-            await context.bot.send_message(chat_id=chat_id, text="❌ Ошибка или время ожидания сессии истекло.")
+            try:
+                # На случай критической ошибки тоже пробуем снять экран
+                err_screenshot = await page.screenshot(type="png")
+                await context.bot.send_photo(chat_id=chat_id, photo=err_screenshot, caption=f"❌ Сбой Playwright.\nОшибка: {str(e)[:100]}")
+            except Exception:
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка или время ожидания сессии истекло.\nДетали: {str(e)[:100]}")
         finally:
             await browser.close()
-
 # --- Команды Telegram ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
