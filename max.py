@@ -541,9 +541,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 diff = now - last_bonus_time
                 diff_hours = diff.total_seconds() / 3600
                 
-                if diff_hours < 48:
+                # ИЗМЕНЕНО: Проверяем 24 часа вместо 48
+                if diff_hours < 24:
                     can_claim = False
-                    seconds_left = int((48 * 3600) - diff.total_seconds())
+                    # ИЗМЕНЕНО: Считаем остаток от 24 часов
+                    seconds_left = int((24 * 3600) - diff.total_seconds())
                     hours = seconds_left // 3600
                     minutes = (seconds_left % 3600) // 60
                     remaining_time_str = f"{hours}ч. {minutes}мин."
@@ -557,8 +559,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             welcome_text, reply_kb = main_menu_content(chat_id)
             
+            # ИЗМЕНЕНО: Текст уведомления изменен на 24 часа
             await query.message.reply_text(
-                f"🎁 Поздравляем!\nВы успешно забрали бонус +$0.30!\n\nСледующий бонус будет доступен через 48 часов."
+                f"🎁 **Поздравляем!**\nВы успешно забрали бонус `+$0.30`!\n\nСледующий бонус будет доступен через 24 часа."
             )
             try:
                 await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
@@ -566,7 +569,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         else:
             await query.message.reply_text(
-                f"❌ Вы уже забирали бонус!\n\nПриходите позже. До получения следующего бонуса осталось: {remaining_time_str}."
+                f"❌ **Вы уже забирали бонус!**\n\nПриходите позже. До получения следующего бонуса осталось: **{remaining_time_str}**."
             )
             
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
