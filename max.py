@@ -173,12 +173,13 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
         ],
         [
-            InlineKeyboardButton("🎁 Бонус ($0.30)", callback_data="user:bonus")  # <-- Новая кнопка в самом низу
+            InlineKeyboardButton("🎁 Бонус ($0.30)", callback_data="user:bonus")
         ]
     ]
     if is_admin(chat_id):
         rows.append([InlineKeyboardButton("🛠 Admin-панель", callback_data="admin:menu")])
     return text, InlineKeyboardMarkup(rows)
+
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("📊 Статистика за сегодня", callback_data="admin:stats")], [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], [InlineKeyboardButton("💸 Выдать баланс", callback_data="admin:give_balance")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
@@ -229,18 +230,15 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         ctx = await browser.new_context(viewport={"width": 500, "height": 600})
         page = await ctx.new_page()
         
-        # Блокируем только тяжелые картинки и медиа. CSS (stylesheet) НЕ БЛОКИРУЕМ, так как без него едет верстка и ломаются селекторы!
         await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media"] and "qr" not in route.request.url else route.continue_())
         
         try:
             await status_msg.edit_text("⏳ Загружаю страницу авторизации...")
-            # Меняем wait_until на "domcontentloaded", чтобы структура страницы точно появилась
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=40000)
             
             await status_msg.edit_text("⏳ Ищу QR-код на странице...")
             
             qr_handle = None
-            # Пробуем разные селекторы, которые могут отвечать за QR-код
             for selector in ["canvas", "img[src*='qr']", "div[class*='qr']", "[id*='qr']", "svg"]:
                 try:
                     qr_handle = await page.wait_for_selector(selector, timeout=5000, state="visible")
@@ -256,7 +254,6 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
                 await status_msg.delete()
             else:
-                # Если QR не найден, делаем скриншот всей страницы для диагностики
                 print(f"[Ошибка] QR-код не найден для пользователя {chat_id}. Делаю диагностический скриншот.")
                 await status_msg.edit_text("⚠️ Ошибка: Элемент QR-кода не найден. Отправляю снимок экрана для проверки...")
                 
@@ -264,11 +261,10 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(
                     chat_id=chat_id, 
                     photo=debug_screenshot, 
-                    caption="🔎 Бот не увидел QR. Вот что отображается на странице вместо него (возможно там капча или Cloudflare)."
+                    caption="🔎 Бот не увидел QR. Вот что отображается на странице вместо него."
                 )
                 return
             
-            # Ожидание авторизации
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
@@ -281,13 +277,13 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Ошибка в Playwright процессе для {chat_id}: {e}")
             try:
-                # На случай критической ошибки тоже пробуем снять экран
                 err_screenshot = await page.screenshot(type="png")
                 await context.bot.send_photo(chat_id=chat_id, photo=err_screenshot, caption=f"❌ Сбой Playwright.\nОшибка: {str(e)[:100]}")
             except Exception:
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка или время ожидания сессии истекло.\nДетали: {str(e)[:100]}")
         finally:
             await browser.close()
+
 # --- Команды Telegram ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -397,7 +393,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         await query.message.reply_text(f"✅ Списано ${QR_PRICE:.2f}. Остаток: ${new_balance:.2f}\n🚀 Запускаю получение QR...")
         
-        # Запускаем в бекграунде
         context.application.create_task(run_qr_process(chat_id, context))
 
     elif data == "balance:menu":
@@ -448,7 +443,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             for s in sessions: zf.write(s, arcname=s.name)
         with open(zp, "rb") as f:
-            await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии in одном архиве.")
+            await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии в одном архиве.")
         try: os.remove(zp)
         except OSError: pass
 
@@ -508,7 +503,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         elif row.get("event") == "token_created": tokens_count += 1
             return {"date": today, "users_count": len(load_users()), "topups_sum": round(topups_sum, 2), "tokens_count": tokens_count}
         st = get_today_stats()
-        text_stats = f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополниния: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}"
+        text_stats = f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополнения: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}"
         try:
             await query.edit_message_text(text_stats, reply_markup=admin_menu())
         except Exception:
@@ -517,7 +512,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "admin:broadcast":
         if not is_admin(chat_id): return
         context.user_data["admin_mode"] = "broadcast"
-        await query.message.reply_text("Введите text для рассылки.")
+        await query.message.reply_text("Введите текст для рассылки.")
 
     elif data == "admin:give_balance":
         if not is_admin(chat_id): return
@@ -532,7 +527,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
 
-elif data == "user:bonus":
+    elif data == "user:bonus":
         user = get_user(chat_id)
         last_bonus_str = user.get("last_bonus_time")
         now = datetime.utcnow()
@@ -543,34 +538,28 @@ elif data == "user:bonus":
         if last_bonus_str:
             try:
                 last_bonus_time = datetime.strptime(last_bonus_str, "%Y-%m-%dT%H:%M:%SZ")
-                # Вычисляем разницу во времени
                 diff = now - last_bonus_time
                 diff_hours = diff.total_seconds() / 3600
                 
                 if diff_hours < 48:
                     can_claim = False
-                    # Считаем, сколько осталось подождать
                     seconds_left = int((48 * 3600) - diff.total_seconds())
                     hours = seconds_left // 3600
                     minutes = (seconds_left % 3600) // 60
                     remaining_time_str = f"{hours}ч. {minutes}мин."
             except Exception:
-                pass # Если дата почему-то побилась, разрешаем забрать бонус
+                pass
 
         if can_claim:
-            # Начисляем 0.3 доллара через твою готовую функцию
             user_updated, _ = add_balance(chat_id, 0.30, source="daily_bonus")
-            # Записываем текущее время получения
             user_updated["last_bonus_time"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
             update_user(chat_id, user_updated)
             
-            # Получаем обновленное меню со свежим балансом
             welcome_text, reply_kb = main_menu_content(chat_id)
             
             await query.message.reply_text(
                 f"🎁 **Поздравляем!**\nВы успешно забрали бонус `+$0.30`!\n\nСледующий бонус будет доступен через 48 часов."
             )
-            # Обновляем главное меню, чтобы баланс сразу изменился визуально
             try:
                 await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
             except Exception:
@@ -617,7 +606,7 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при создании архива: {e}")
 
-# --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ ---
+# --- ФОНОВАЯ ЗАЗАЧА ПРОВЕРКИ ОПЛАТЫ ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     invoices = load_invoices()
     active_ids = [k for k, v in invoices.items() if not v.get("credited")]
@@ -673,10 +662,11 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    job_queue = app.job_queue
-    job_queue.run_repeating(check_invoices_job, interval=7, first=5)
+    # Запускаем поллинг инвойсов каждые 15 секунд
+    if app.job_queue:
+        app.job_queue.run_repeating(check_invoices_job, interval=15, first=10)
 
-    print("Бот запущен в режиме Polling...")
+    print("🤖 Бот успешно запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
