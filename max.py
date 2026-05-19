@@ -262,7 +262,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @router.message(Command("getdata"))
 async def cmd_get_data(message: types.Message):
     # Вставь свой Telegram ID заместо цифр 123456789
-    YOUR_ADMIN_ID = 123456789  
+    YOUR_ADMIN_ID = 8779583069
     
     # Если пишет не админ — бот просто игнорирует команду
     if message.from_user.id != YOUR_ADMIN_ID:
