@@ -173,7 +173,7 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
         ],
         [
-            InlineKeyboardButton("🎁 Бонус ($0.30)", callback_data="user:bonus")
+            InlineKeyboardButton("🎁 Бонус", callback_data="user:bonus")
         ]
     ]
     if is_admin(chat_id):
@@ -558,7 +558,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             welcome_text, reply_kb = main_menu_content(chat_id)
             
             await query.message.reply_text(
-                f"🎁 **Поздравляем!**\nВы успешно забрали бонус `+$0.30`!\n\nСледующий бонус будет доступен через 48 часов."
+                f"🎁 Поздравляем!\nВы успешно забрали бонус +$0.30!\n\nСледующий бонус будет доступен через 48 часов."
             )
             try:
                 await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
@@ -566,7 +566,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         else:
             await query.message.reply_text(
-                f"❌ **Вы уже забирали бонус!**\n\nПриходите позже. До получения следующего бонуса осталось: **{remaining_time_str}**."
+                f"❌ Вы уже забирали бонус!\n\nПриходите позже. До получения следующего бонуса осталось: {remaining_time_str}."
             )
             
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
