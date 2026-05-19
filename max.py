@@ -5,8 +5,6 @@ import zipfile
 import urllib.parse
 import asyncio
 import shutil
-import os
-from telegram import FSInputFile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -15,15 +13,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 # Конфигурация
-# Настройки в самом верху maxx.py
 BOT_TOKEN = "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys"
-CRYPTO_PAY_TOKEN = "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy"  # <--- Прямо внутри кавычек
+CRYPTO_PAY_TOKEN = "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy"
 CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
-DATA_DIR = Path("data")
+
+# Настройка путей под Railway Volume (/app/sessions)
+DATA_DIR = Path("/app/sessions")
 DATA_DIR.mkdir(exist_ok=True)
 
-SESSIONS_DIR = DATA_DIR / "sessions"
+SESSIONS_DIR = DATA_DIR / "user_sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
@@ -466,39 +465,42 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["admin_mode"] = "give_balance"
         await query.message.reply_text("Введите: <username> <сумма>")
     elif data == "back_to_main":
-        context.user_data.pop("user_mode", None)  # Сбрасываем режим ввода
-        await query.edit_message_text("Выберите действие:", reply_markup=main_menu(chat_id))
+        context.user_data.pop("user_mode", None)
+        try:
+            await query.edit_message_text("Выберите действие:", reply_markup=main_menu(chat_id))
+        except Exception as e:
+            if "Message is not modified" not in str(e):
+                raise e
 
-async def export_data_archive(update, context):
-    # Твой Telegram ID для защиты, чтобы никто другой не скачал базу
-    # Убедись, что этот ID совпадает с твоим (на скриншоте было 8779583069)
+async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Защита по Telegram ID
     if update.effective_user.id != 8779583069: 
         return
 
-    await update.message.reply_text("Собираю архив папки data, подожди...")
+    await update.message.reply_text("Собираю архив папки данных из Volume, подожди...")
 
     try:
-        # Указываем папку, в которой лежит всё: и сессии, и юзеры
-        target_dir = "data" 
-        archive_name = "bot_data_backup"
+        target_dir = "/app/sessions" 
+        archive_name = "/app/bot_data_backup"
 
-        # Создаем zip-архив из всей папки data
+        # Создаем zip-архив
         shutil.make_archive(archive_name, 'zip', target_dir)
+        zip_path = f"{archive_name}.zip"
 
-        # Отправляем архив в чат
-        await update.message.reply_document(
-            document=FSInputFile(f"{archive_name}.zip"),
-            caption="Вот полный бэкап папки data (сессии, юзеры, инвойсы)!"
-        )
+        # Отправляем архив в чат с помощью встроенных средств python-telegram-bot
+        with open(zip_path, "rb") as archive_file:
+            await update.message.reply_document(
+                document=archive_file,
+                filename="bot_data_backup.zip",
+                caption="Вот полный бэкап всех данных (сессии, пользователи, инвойсы) из постоянного хранилища!"
+            )
         
-        # Удаляем временный zip-файл, чтобы он не занимал место в контейнере
-        os.remove(f"{archive_name}.zip")
+        # Удаляем временный файл
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
 
     except Exception as e:
         await update.message.reply_text(f"Ошибка при создании архива: {e}")
-
-# Добавь эту строчку вниз к остальным хендлерам (например, под командой /start)
-app.add_handler(CommandHandler("getdata", export_data_archive))
 
 # --- ФОНОВАЯ ЗАДАЧА ПРОВЕРКИ ОПЛАТЫ (Через Поллинг API) ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
