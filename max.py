@@ -14,7 +14,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 # Конфигурация (замени значения или используй os.getenv)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys")
-CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "583752:AAitno5sv2mSdC8rdRzuQXdyXnCGyAKqvWy")
+CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "584628:AAoCvpqJjjLh1PlsKRUNUyz17SmTF6WW6Kh")
 CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
 
