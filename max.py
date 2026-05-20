@@ -33,7 +33,7 @@ MIN_QR_BALANCE = 0.1
 REFERRAL_BONUS = 0.2
 QR_PRICE = 0.1
 
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8779583069").split(",") if x.strip().isdigit()}
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8949311928").split(",") if x.strip().isdigit()}
 
 # --- Работа с JSON файлами ---
 def load_json(path: Path, default):
