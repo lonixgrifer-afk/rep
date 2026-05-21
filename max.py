@@ -139,18 +139,8 @@ def add_balance(chat_id: int, amount: float, source: str = "self") -> tuple[dict
     return user, referral_message
 
 def charge_for_qr(chat_id: int) -> tuple[bool, float]:
-    users = load_users()
-    key = str(chat_id)
-    if key not in users:
-        users[key] = {"balance": 0.0, "referrer": None, "referrals": 0, "has_recharged": False}
-    user = users[key]
-    balance = float(user.get("balance", 0.0))
-    if balance < QR_PRICE: return False, balance
-    user["balance"] = round(balance - QR_PRICE, 2)
-    users[key] = user
-    save_users(users)
-    log_event("qr_charged", {"chat_id": chat_id, "amount": QR_PRICE})
-    return True, user["balance"]
+    # Просто возвращаем успех, без проверки баланса и списаний
+    return True, 0.0
 
 def is_admin(chat_id: int) -> bool: return chat_id in ADMIN_IDS
 def session_path(chat_id: int) -> Path: return SESSIONS_DIR / f"session_{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.json"
@@ -158,23 +148,14 @@ def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f
 
 # --- Меню ---
 def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    balance = float(get_user(chat_id).get("balance", 0.0))
-    text = (
-        f"💳 **Ваш баланс:** `${balance:.2f}`\n\n"
-        f"👇 Выберите нужное действие в меню ниже:"
-    )
+    # Убираем баланс из текста
+    text = "👇 Выберите нужное действие в меню ниже:"
     rows = [
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
             InlineKeyboardButton("🗂 Мои сессии", callback_data="session:list")
-        ],
-        [
-            InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance:menu"),
-            InlineKeyboardButton("👥 Рефералка", callback_data="ref:menu")
-        ],
-        [
-            InlineKeyboardButton("🎁 Бонус", callback_data="user:bonus")
         ]
+        # Кнопки "Пополнить баланс" и "Бонус" можно удалить из списка rows
     ]
     if is_admin(chat_id):
         rows.append([InlineKeyboardButton("🛠 Admin-панель", callback_data="admin:menu")])
@@ -430,28 +411,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     if data == "qr:get":
-        balance = float(get_user(chat_id).get("balance", 0.0))
-        if balance < MIN_QR_BALANCE:
-            welcome_text, reply_kb = main_menu_content(chat_id)
-            await query.message.reply_text(f"❌ Недостаточно средств. Нужно минимум ${MIN_QR_BALANCE:.2f}. Баланс: ${balance:.2f}", reply_markup=reply_kb)
-            return
-        ok, new_balance = charge_for_qr(chat_id)
-        if not ok:
-            welcome_text, reply_kb = main_menu_content(chat_id)
-            await query.message.reply_text(f"❌ Недостаточно средств. Баланс: ${new_balance:.2f}", reply_markup=reply_kb)
-            return
-        await query.message.reply_text(f"✅ Списано ${QR_PRICE:.2f}. Остаток: ${new_balance:.2f}\n🚀 Запускаю получение QR...")
-        
+        # Убираем проверку на MIN_QR_BALANCE и функцию charge_for_qr
+        await query.message.reply_text("🚀 Запускаю получение QR...")
         context.application.create_task(run_qr_process(chat_id, context))
-
-    elif data == "balance:menu":
-        context.user_data["user_mode"] = "enter_balance"
-        kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
-        try:
-            await query.edit_message_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            await query.message.reply_text(f"💳 Ваш текущий баланс: ${float(get_user(chat_id).get('balance', 0.0)):.2f}\n\n✍️ **Введите сумму в чат**:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
-
+        
     elif data == "ref:menu":
         uname = (await context.bot.get_me()).username
         u = get_user(chat_id)
