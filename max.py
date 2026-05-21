@@ -149,11 +149,11 @@ def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f
 # --- Меню ---
 def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
     # Убираем баланс из текста
-    text = "👇 Выберите нужное действие в меню ниже:"
+    text = "⌚️ Получите куар, отсканируйте, и получите токен, бесплатно)"
     rows = [
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
-            InlineKeyboardButton("🗂 Мои сессии", callback_data="session:list")
+            InlineKeyboardButton("🗄️ Мои сессии", callback_data="session:list")
         ]
         # Кнопки "Пополнить баланс" и "Бонус" можно удалить из списка rows
     ]
