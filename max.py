@@ -162,8 +162,12 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(rows)
 
 def admin_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📊 Статистика за сегодня", callback_data="admin:stats")], [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], [InlineKeyboardButton("💸 Выдать баланс", callback_data="admin:give_balance")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
-
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], 
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]
+    ])
+    
 def session_menu(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("📦 Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
@@ -387,22 +391,6 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data.pop("admin_mode", None)
         await update.message.reply_text(f"✅ Рассылка завершена. Отправлено: {sent}")
         
-    elif admin_mode == "give_balance":
-        parts = text.split()
-        if len(parts) != 2:
-            await update.message.reply_text("Формат: <username> <сумма>")
-            return
-        uid, u = get_user_by_username(parts[0])
-        if uid is None:
-            await update.message.reply_text("❌ Пользователь не найден.")
-            return
-        try: amount = float(parts[1])
-        except ValueError:
-            await update.message.reply_text("❌ Неверная сумма.")
-            return
-        user, _ = add_balance(uid, amount, source="admin")
-        context.user_data.pop("admin_mode", None)
-        await update.message.reply_text(f"✅ Выдано ${amount:.2f} @{u.get('username','')}. Баланс: ${float(user.get('balance',0)):.2f}")
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -526,11 +514,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["admin_mode"] = "broadcast"
         await query.message.reply_text("Введите текст для рассылки.")
 
-    elif data == "admin:give_balance":
-        if not is_admin(chat_id): return
-        context.user_data["admin_mode"] = "give_balance"
-        await query.message.reply_text("Введите: <username> <сумма>")
-
     elif data == "back_to_main":
         context.user_data.pop("user_mode", None)
         welcome_text, reply_kb = main_menu_content(chat_id)
@@ -538,51 +521,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
         except Exception:
             await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-
-    elif data == "user:bonus":
-        user = get_user(chat_id)
-        last_bonus_str = user.get("last_bonus_time")
-        now = datetime.utcnow()
-        
-        can_claim = True
-        remaining_time_str = ""
-        
-        if last_bonus_str:
-            try:
-                last_bonus_time = datetime.strptime(last_bonus_str, "%Y-%m-%dT%H:%M:%SZ")
-                diff = now - last_bonus_time
-                diff_hours = diff.total_seconds() / 3600
-                
-                # ИЗМЕНЕНО: Проверяем 24 часа вместо 48
-                if diff_hours < 24:
-                    can_claim = False
-                    # ИЗМЕНЕНО: Считаем остаток от 24 часов
-                    seconds_left = int((24 * 3600) - diff.total_seconds())
-                    hours = seconds_left // 3600
-                    minutes = (seconds_left % 3600) // 60
-                    remaining_time_str = f"{hours}ч. {minutes}мин."
-            except Exception:
-                pass
-
-        if can_claim:
-            user_updated, _ = add_balance(chat_id, 0.30, source="daily_bonus")
-            user_updated["last_bonus_time"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            update_user(chat_id, user_updated)
-            
-            welcome_text, reply_kb = main_menu_content(chat_id)
-            
-            # ИЗМЕНЕНО: Текст уведомления изменен на 24 часа
-            await query.message.reply_text(
-                f"🎁 Поздравляем!\nВы успешно забрали бонус +$0.30!\n\nСледующий бонус будет доступен через 24 часа."
-            )
-            try:
-                await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-            except Exception:
-                pass
-        else:
-            await query.message.reply_text(
-                f"❌ Вы уже забирали бонус!\n\nПриходите позже. До получения следующего бонуса осталось: {remaining_time_str}."
-            )
             
 async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     YOUR_ADMIN_ID = 8949311928
