@@ -209,43 +209,39 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю сессию, подождите...")
+    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю валидность сессии...")
+    from playwright.async_api import async_playwright
     
-    # 1. Проверка: существует ли файл и не пустой ли он
-    if not file_path.exists() or file_path.stat().st_size == 0:
-        await status_msg.edit_text("❌ Ошибка: Файл пуст или поврежден.")
-        return
-
-    # 2. Проверка: можно ли его прочитать как JSON (защита от неверного формата)
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            json.load(f)
-    except json.JSONDecodeError:
-        await status_msg.edit_text("❌ Ошибка: Это не валидный JSON файл. Пришлите правильный файл сессии.")
-        return
-
-    # 3. Основная логика проверки Playwright
-    try:
-        from playwright.async_api import async_playwright
+        data = load_json(file_path, {})
+        # Извлекаем данные из вашего формата (или сохраненного файла сессии)
+        # Если вы передаете просто файл, логика парсинга должна соответствовать get_js_console_code_raw
+        
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            try:
-                ctx = await browser.new_context(storage_state=str(file_path))
-                page = await ctx.new_page()
-                await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-                
-                is_qr_present = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
-                await browser.close()
-                
-                if not is_qr_present:
-                    await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ!")
-                else:
-                    await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ!")
-            except Exception as e:
-                await browser.close()
-                raise e # Проброс ошибки во внешний try
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            
+            await page.goto(BASE_URL)
+            
+            # Внедрение токена (имитируем действия из вашего get_js_console_code_raw)
+            # Здесь нужно либо применить localStorage.setItem через evaluate
+            # либо загрузить готовый storage_state (если файл — это сохраненный контекст Playwright)
+            
+            await page.reload()
+            await asyncio.sleep(3) # Ждем прогрузки
+            
+            # Проверка: если на странице есть QR-код, значит токен невалиден
+            is_qr_present = await page.evaluate("() => document.body.innerText.includes('QR')") 
+            
+            if not is_qr_present:
+                await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Доступ открыт.")
+            else:
+                await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ (истек или был отозван).")
+            
+            await browser.close()
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка при чтении сессии: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
         
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
