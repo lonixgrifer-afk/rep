@@ -737,39 +737,28 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если в данных пользователя нет списка, создаем его
-    if 'files_to_check' not in context.user_data:
-        context.user_data['files_to_check'] = []
-    
-    # Добавляем документ в список
+    # Берем документ из текущего сообщения
     doc = update.message.document
-    context.user_data['files_to_check'].append(doc)
-    
-    # Даем боту 3 секунды, чтобы он "подождал" остальные файлы группы
-    # Если за 3 секунды новых файлов не пришло, запускаем проверку
-    context.job_queue.run_once(process_files_job, 3, chat_id=update.effective_chat.id)
-    
-    await update.message.reply_text(f"📥 Файл {doc.file_name} в очереди (всего: {len(context.user_data['files_to_check'])}). Жду еще...")
+    if not doc:
+        return ConversationHandler.END
 
-    for doc in files:
-        file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
-        try:
-            # Скачиваем
-            await (await doc.get_file()).download_to_drive(file_path)
-            
-            # --- ВАЖНО: Вызов функции проверки ---
-            # Мы вызываем функцию и ждем её завершения
-            await check_token_validity(update.effective_chat.id, file_path, context)
-            
-        except Exception as e:
-            await context.bot.send_message(update.effective_chat.id, f"⚠️ Ошибка файла {doc.file_name}: {str(e)}")
-        finally:
-            # Удаляем файл в любом случае, даже если была ошибка
-            if file_path.exists():
-                os.remove(file_path)
+    # Сразу пишем, что начали проверку именно этого файла
+    status_msg = await update.message.reply_text(f"🔍 Начинаю проверку файла: {doc.file_name}...")
 
-    await update.message.reply_text("✅ Все файлы обработаны.")
-    return ConversationHandler.END
+    # Скачиваем файл
+    file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
+    await (await doc.get_file()).download_to_drive(file_path)
+
+    # Запускаем проверку прямо сейчас
+    # Используем одну функцию, которая запускает браузер, проверяет и закрывает его
+    # (Или лучше: запускай браузер внутри check_token_validity)
+    await check_token_validity(update.effective_chat.id, file_path, context, status_msg)
+
+    # Удаляем файл
+    if file_path.exists():
+        os.remove(file_path)
+
+    return WAITING_FOR_TOKEN # Возвращаемся в состояние ожидания, чтобы бот принял следующий файл
 
 async def process_files_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
@@ -786,7 +775,7 @@ async def process_files_job(context: ContextTypes.DEFAULT_TYPE):
     # ОЧИСТКА после проверки
     context.user_data['files_to_check'] = []
 
-    
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
