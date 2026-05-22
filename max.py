@@ -504,6 +504,31 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ]
         await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
 
+    # 1. Обработка выбора формата (когда нажали .txt или .json внутри сессии)
+    elif data.startswith("sess_get_txt:") or data.startswith("sess_get_json:"):
+        # Разбираем данные, например "sess_get_txt:session_123_456.json"
+        parts = data.split(":")
+        mode = parts[0]    # sess_get_txt
+        filename = parts[1] # session_123_456.json
+        
+        t = SESSIONS_DIR / filename
+        if not t.exists():
+            await query.answer("❌ Файл не найден", show_alert=True)
+            return
+            
+        if "txt" in mode:
+            content = get_js_console_code(t)
+            filename_out = "login.txt"
+        else:
+            content = get_raw_json(t)
+            filename_out = "session.json"
+            
+        bio = BytesIO(content.encode("utf-8"))
+        bio.name = filename_out
+        await query.message.reply_document(document=bio, caption=f"✅ Ваш файл: {filename_out}")
+        await query.answer("Файл отправлен")
+
+    # 2. Обработка кнопки "Выгрузить" (sess_choice:...)
     elif data.startswith("sess_choice:"):
         fn = data.split(":", 1)[1]
         kb = [
@@ -511,25 +536,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [InlineKeyboardButton("⚙️ .json (Сессия)", callback_data=f"sess_get_json:{fn}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"sess_manage:{fn}")]
         ]
-        await query.edit_message_text("Выберите формат файла:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data.startswith("sess_get_txt:") or data.startswith("sess_get_json:"):
-        mode, fn = data.split(":", 1)[1].split(":", 1) if ":" in data else (data.split("_")[2], data.split(":", 1)[1])
-        t = SESSIONS_DIR / fn
-        if not t.exists():
-            await query.answer("Файл не найден", show_alert=True)
-            return
-            
-        if "txt" in data:
-            content = get_js_console_code(t)
-            filename = "login.txt"
-        else:
-            content = get_raw_json(t)
-            filename = "session.json"
-            
-        bio = BytesIO(content.encode("utf-8"))
-        bio.name = filename
-        await query.message.reply_document(document=bio, caption=f"Ваш файл: {filename}")
+        await query.edit_message_text("Выберите формат для загрузки:", reply_markup=InlineKeyboardMarkup(kb))
         
     elif data == "session:list":
         try:
