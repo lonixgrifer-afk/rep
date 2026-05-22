@@ -893,16 +893,10 @@ async def start_check_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     doc = update.message.document
+    # ... ваш код скачивания ...
+    # ... вызов check_token_validity ...
+    return ConversationHandler.END # ЭТО ОБЯЗАТЕЛЬНО
     
-    # Сохраняем файл
-    file_path = SESSIONS_DIR / doc.file_name
-    await (await doc.get_file()).download_to_drive(custom_path=file_path)
-    
-    # Передаем в проверку
-    await check_token_validity(chat_id, file_path, context)
-    
-    # ЭТО ОЧЕНЬ ВАЖНО: чтобы бот вышел из режима ожидания файла
-    return ConversationHandler.END
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -913,8 +907,7 @@ def main() -> None:
         CallbackQueryHandler(start_convert_mode, pattern='mode_convert')
     ],
     states={
-        # Заменили receive_token_data на handle_file
-        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_file)], 
+        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_file)],
         WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, process_conversion)]
     },
     fallbacks=[]
