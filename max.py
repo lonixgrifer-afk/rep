@@ -4,6 +4,8 @@ import urllib.request
 import zipfile
 import urllib.parse
 import asyncio
+import logging
+logging.basicConfig(level=logging.INFO)
 from telegram.ext import ConversationHandler
 import shutil
 from datetime import datetime
@@ -760,14 +762,17 @@ def main() -> None:
 
     # Сначала ConversationHandler (он специфичен)
     check_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
-        states={
-            WAITING_FOR_TOKEN: [
-                MessageHandler(filters.Document.ALL, receive_token_data),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
+    entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
+    states={
+        WAITING_FOR_TOKEN: [
+            MessageHandler(filters.Document.ALL, receive_token_data),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data),
+            # Добавьте этот обработчик, чтобы кнопки работали внутри диалога:
+            CallbackQueryHandler(callback_router) 
+        ]
+    },
+    fallbacks=[CommandHandler("cancel", cancel)]
+)
     )
     app.add_handler(check_conv)
 
