@@ -737,35 +737,33 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Собираем все документы из сообщения
-    # Если это группа файлов, они придут как список документов
-    documents = []
+    # Если это сообщение с одним файлом
     if update.message.document:
-        documents.append(update.message.document)
-    elif update.message.media_group_id:
-        # Здесь логика сложнее, так как Telegram присылает файлы разными сообщениями
-        # Но если ты просто кидаешь файлы списком в одно сообщение, 
-        # то обычно они приходят как коллекция
-        pass
-
-    if not documents:
-        await update.message.reply_text("❌ Пришлите файлы (json или txt).")
+        files = [update.message.document]
+    else:
+        await update.message.reply_text("❌ Пришлите файл.")
         return ConversationHandler.END
 
-    await update.message.reply_text(f"🚀 Принято файлов: {len(documents)}. Начинаю проверку...")
+    await update.message.reply_text(f"🚀 Принято файлов: {len(files)}. Начинаю проверку...")
 
-    # 2. Обрабатываем каждый файл в цикле
-    for doc in documents:
+    for doc in files:
         file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
-        await (await doc.get_file()).download_to_drive(file_path)
-        
-        # Передаем на проверку
-        await check_token_validity(doc.chat_id, file_path, context)
-        
-        # Чистим
-        if file_path.exists():
-            os.remove(file_path)
+        try:
+            # Скачиваем
+            await (await doc.get_file()).download_to_drive(file_path)
             
+            # --- ВАЖНО: Вызов функции проверки ---
+            # Мы вызываем функцию и ждем её завершения
+            await check_token_validity(update.effective_chat.id, file_path, context)
+            
+        except Exception as e:
+            await context.bot.send_message(update.effective_chat.id, f"⚠️ Ошибка файла {doc.file_name}: {str(e)}")
+        finally:
+            # Удаляем файл в любом случае, даже если была ошибка
+            if file_path.exists():
+                os.remove(file_path)
+
+    await update.message.reply_text("✅ Все файлы обработаны.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
