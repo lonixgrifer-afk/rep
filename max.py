@@ -921,6 +921,9 @@ def main() -> None:
         app.job_queue.run_repeating(check_invoices_job, interval=15, first=10)
 
     print("🤖 Бот успешно запущен!")
+# В функции main(), перед запуском апдейтера:
+# Удаляем любой старый Webhook, который может мешать
+    app.bot.delete_webhook(drop_pending_updates=True)
     app.run_polling()
 
 if __name__ == "__main__":
