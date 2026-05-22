@@ -172,7 +172,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     ])
     
 def session_menu(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("🔍 Проверить токен (файл/код)", callback_data="check_init")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
 def get_js_console_code_raw(file_path: Path) -> str:
     try:
