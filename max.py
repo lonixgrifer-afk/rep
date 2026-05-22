@@ -161,11 +161,8 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
         [
             InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
             InlineKeyboardButton("🗄️ Мои сессии", callback_data="session:list")
-        ],
-        [
-            InlineKeyboardButton("🔍 Проверить токен", callback_data="check_init"), # Добавлена запятая
-            InlineKeyboardButton("🔄 Конвертировать в JSON", callback_data='mode_convert')
         ]
+        # Вторая строка с кнопками удалена
     ]
     
     if is_admin(chat_id):
