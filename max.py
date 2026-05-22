@@ -762,17 +762,16 @@ def main() -> None:
 
     # Сначала ConversationHandler (он специфичен)
     check_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
-    states={
-        WAITING_FOR_TOKEN: [
-            MessageHandler(filters.Document.ALL, receive_token_data),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data),
-            # Добавьте этот обработчик, чтобы кнопки работали внутри диалога:
-            CallbackQueryHandler(callback_router) 
-        ]
-    },
-    fallbacks=[CommandHandler("cancel", cancel)]
-)
+        entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
+        states={
+            WAITING_FOR_TOKEN: [
+                MessageHandler(filters.Document.ALL, receive_token_data),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data),
+                CallbackQueryHandler(callback_router) 
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ) # Только одна скобка здесь
     )
     app.add_handler(check_conv)
 
