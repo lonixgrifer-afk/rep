@@ -208,43 +208,54 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 async def check_token_validity(chat_id, file_path, context, status_msg):
-    print(f"DEBUG: Начало функции для {file_path.name}")
+    print(f"DEBUG: Обработка файла: {file_path.name}")
     try:
-        if not file_path.exists():
-            await status_msg.edit_text("❌ Файл не найден!")
-            return
+        # 1. Если это TXT, попробуем "на лету" превратить его в JSON
+        # Предполагаем, что внутри TXT лежит валидный JSON
+        final_path = file_path
+        if file_path.suffix.lower() == '.txt':
+            content = file_path.read_text(encoding='utf-8', errors='ignore').strip()
+            # Пытаемся понять, это JSON-структура или просто мусор
+            if content.startswith('{'):
+                json_path = file_path.with_suffix('.json')
+                with open(json_path, 'w') as f:
+                    f.write(content)
+                final_path = json_path
+            else:
+                await status_msg.edit_text(f"❌ {file_path.name}: Неверный формат текста (не JSON)")
+                return
 
+        # 2. Проверка Playwright
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            # Запуск браузера
             browser = await p.chromium.launch(headless=True)
             
-            # Создаем контекст С ФАЙЛОМ СЕССИИ
-            # Если это .txt, то код не сработает (нужен .json), 
-            # поэтому убедись, что file_path ведет на .json
-            context_browser = await browser.new_context(storage_state=str(file_path))
+            # Загружаем сессию
+            context_browser = await browser.new_context(storage_state=str(final_path))
             page = await context_browser.new_page()
             
-            print("DEBUG: Перехожу на сайт...")
-            await page.goto(BASE_URL, timeout=20000)
+            await page.goto(BASE_URL, timeout=25000)
+            await page.wait_for_timeout(4000) # Даем чуть больше времени на прогрузку
             
-            # Ждем прогрузки
-            await page.wait_for_timeout(3000) 
-            
-            # Логика поиска
+            # Проверки
             is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
             is_chat = await page.evaluate("() => !!(document.querySelector('.chat') || document.querySelector('.main-content'))")
             
+            # Скриншот для дебага (если нужно увидеть, что там)
+            # await page.screenshot(path="debug.png") 
+            
             await browser.close()
             
-            # Результаты
+            # Ответ
             if is_qr:
-                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (есть QR)")
+                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (QR на экране)")
             elif is_chat:
                 await status_msg.edit_text(f"✅ {file_path.name}: ВАЛИДНЫЙ!")
             else:
-                await status_msg.edit_text(f"❓ {file_path.name}: Непонятный статус (не вижу ни чатов, ни QR)")
+                await status_msg.edit_text(f"❓ {file_path.name}: Непонятный статус (не вижу чатов)")
 
+    except json.JSONDecodeError:
+        await status_msg.edit_text(f"❌ {file_path.name}: Ошибка! Файл не является JSON-структурой.")
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
         await status_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
