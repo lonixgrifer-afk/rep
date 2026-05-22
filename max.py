@@ -922,6 +922,17 @@ async def handle_convert_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     return ConversationHandler.END
 
+async def handle_check_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    new_file = await context.bot.get_file(file.file_id)
+    file_path = DATA_DIR / f"check_{update.effective_chat.id}.json"
+    await new_file.download_to_drive(file_path)
+    
+    # Запускаем вашу функцию проверки, которая уже есть в коде
+    await check_token_validity(update.effective_chat.id, file_path, context)
+    
+    return ConversationHandler.END
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -933,7 +944,6 @@ def main() -> None:
     ],
     states={
         WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_check_file)],
-        # ВСТАВЬТЕ ЭТУ СТРОКУ СЮДА:
         WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, handle_convert_file)]
     },
     fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
