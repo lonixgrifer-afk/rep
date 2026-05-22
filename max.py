@@ -476,6 +476,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Убираем проверку на MIN_QR_BALANCE и функцию charge_for_qr
         await query.message.reply_text("🚀 Запускаю получение QR...")
         context.application.create_task(run_qr_process(chat_id, context))
+
+    elif data == "check_init":
+        await query.message.reply_text("📥 Пришлите мне файл сессии (.json) для проверки.\n\nИли напишите /cancel для отмены.")
+        return WAITING_FOR_TOKEN # Это переведет пользователя в состояние ожидания файла
         
     elif data == "ref:menu":
         uname = (await context.bot.get_me()).username
@@ -695,7 +699,13 @@ async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END # Завершаем диалог
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Отменено.")
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
+    
+    # Возврат в главное меню
+    welcome_text, reply_kb = main_menu_content(chat_id)
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
+    
     return ConversationHandler.END
     
 # --- ФОНОВАЯ ЗАЗАЧА ПРОВЕРКИ ОПЛАТЫ ---
