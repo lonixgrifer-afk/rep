@@ -737,23 +737,35 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    # 1. Берем документ
-    file_doc = update.message.document
-    file_path = SESSIONS_DIR / f"temp_{chat_id}_{file_doc.file_name}"
-    await (await file_doc.get_file()).download_to_drive(file_path)
-    
-    await update.message.reply_text("🔍 Анализирую файл...")
-    
-    # 2. Вызываем проверку (которая запускает Playwright)
-    # Вот тут вызываем твою функцию проверки, которую мы правили
-    await check_token_validity(chat_id, file_path, context)
-    
-    # 3. Убираем мусор
-    if file_path.exists():
-        os.remove(file_path)
+    # 1. Собираем все документы из сообщения
+    # Если это группа файлов, они придут как список документов
+    documents = []
+    if update.message.document:
+        documents.append(update.message.document)
+    elif update.message.media_group_id:
+        # Здесь логика сложнее, так как Telegram присылает файлы разными сообщениями
+        # Но если ты просто кидаешь файлы списком в одно сообщение, 
+        # то обычно они приходят как коллекция
+        pass
+
+    if not documents:
+        await update.message.reply_text("❌ Пришлите файлы (json или txt).")
+        return ConversationHandler.END
+
+    await update.message.reply_text(f"🚀 Принято файлов: {len(documents)}. Начинаю проверку...")
+
+    # 2. Обрабатываем каждый файл в цикле
+    for doc in documents:
+        file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
+        await (await doc.get_file()).download_to_drive(file_path)
         
+        # Передаем на проверку
+        await check_token_validity(doc.chat_id, file_path, context)
+        
+        # Чистим
+        if file_path.exists():
+            os.remove(file_path)
+            
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
