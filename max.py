@@ -683,20 +683,29 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
-    # Если прислали файл
+    # 1. Если прислали файл
     if update.message.document:
         file = await update.message.document.get_file()
         temp_path = SESSIONS_DIR / f"temp_{chat_id}.json"
         await file.download_to_drive(temp_path)
+        
+        # Запускаем проверку
         await check_token_validity(chat_id, temp_path, context)
-        if temp_path.exists(): os.remove(temp_path)
-    
-    # Если прислали текст (код)
+        
+        # Удаляем временный файл после проверки
+        if temp_path.exists():
+            os.remove(temp_path)
+            
+    # 2. Если прислали текст (вдруг токен текстом)
     else:
-        # Здесь логика, если нужно проверить просто текст токена
-        await update.message.reply_text("⚠️ Пока поддерживается только отправка файла сессии.")
+        await update.message.reply_text("❌ Пожалуйста, отправьте именно файл сессии (.json).")
+        return ConversationHandler.END
+
+    # Возвращаем пользователя в главное меню после проверки
+    welcome_text, reply_kb = main_menu_content(chat_id)
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
     
-    return ConversationHandler.END
+    return ConversationHandler.END # Завершаем диалог
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Отменено.")
