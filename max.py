@@ -237,9 +237,9 @@ async def check_token_validity(chat_id: int, file_path: Path, context: ContextTy
                 await browser.close()
                 
                 if not is_qr_present:
-                    await status_msg.edit_text("✅ **Токен ВАЛИДНЫЙ!** Сессия активна.")
+                    await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ!")
                 else:
-                    await status_msg.edit_text("❌ **Токен НЕВАЛИДНЫЙ.** Требуется авторизация.")
+                    await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ!")
             except Exception as e:
                 await browser.close()
                 raise e # Проброс ошибки во внешний try
