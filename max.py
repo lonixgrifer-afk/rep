@@ -208,50 +208,53 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await context.bot.send_message(chat_id, "🔍 Анализирую файл...")
+    status_msg = await context.bot.send_message(chat_id, "🔍 Подготовка и анализ файла...")
     
-    # 1. Подготовка файла: если .txt, конвертируем в .json
-    final_json_path = file_path.with_suffix(".json")
-    
+    # Определяем путь для Playwright
+    # Если это .txt, мы создадим .json. Если .json - оставим как есть.
+    target_path = file_path
+    is_temp_file = False
+
     try:
-        if file_path.suffix == '.txt':
+        # 1. Если TXT — парсим в JSON
+        if file_path.suffix.lower() == '.txt':
             content = file_path.read_text(encoding='utf-8')
             data = parse_txt_to_json(content)
             if not data:
-                await status_msg.edit_text("❌ Ошибка: Не удалось распарсить TXT-файл. Проверьте формат.")
+                await status_msg.edit_text("❌ Ошибка: Не удалось извлечь токен из TXT-файла.")
                 return
-            save_json(final_json_path, data)
-        else:
-            final_json_path = file_path
-
-        # 2. Проверка: существует ли файл и не пустой ли он
-        if not final_json_path.exists() or final_json_path.stat().st_size == 0:
-            await status_msg.edit_text("❌ Ошибка: Файл пуст или поврежден.")
-            return
-
-        # 3. Основная логика Playwright
+            
+            target_path = file_path.with_suffix(".json")
+            with open(target_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            is_temp_file = True # Пометим для удаления
+        
+        # 2. Теперь проверка Playwright
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             try:
-                # Используем final_json_path для контекста
-                ctx = await browser.new_context(storage_state=str(final_json_path))
+                # ВАЖНО: передаем строку пути к JSON
+                ctx = await browser.new_context(storage_state=str(target_path))
                 page = await ctx.new_page()
                 await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
                 
                 is_qr_present = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
-                await browser.close()
                 
                 if not is_qr_present:
                     await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Сессия активна.")
                 else:
                     await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ. Требуется авторизация.")
-            except Exception as e:
+            finally:
                 await browser.close()
-                raise e
-                
+
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка при проверке сессии: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
+    
+    finally:
+        # 3. Чистим за собой
+        if is_temp_file and target_path.exists():
+            os.remove(target_path)
     
     # Если мы создавали временный .json из .txt, удалим его
     if file_path.suffix == '.txt' and final_json_path.exists():
