@@ -887,6 +887,10 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 print(f"Не удалось отправить уведомление для {chat_id}: {e}")
     if updated: save_invoices(invoices)
 
+async def start_check_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.message.reply_text("📥 Пришли мне файл:")
+    return WAITING_FOR_TOKEN # Убедись, что это состояние у тебя определено
+    
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
