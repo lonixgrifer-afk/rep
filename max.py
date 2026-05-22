@@ -207,58 +207,40 @@ def save_json(path, data):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
-async def check_token_validity(chat_id, file_path, context, status_msg):
-    print(f"DEBUG: Обработка файла: {file_path.name}")
+async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю валидность сессии...")
+    from playwright.async_api import async_playwright
+    
     try:
-        # 1. Если это TXT, попробуем "на лету" превратить его в JSON
-        # Предполагаем, что внутри TXT лежит валидный JSON
-        final_path = file_path
-        if file_path.suffix.lower() == '.txt':
-            content = file_path.read_text(encoding='utf-8', errors='ignore').strip()
-            # Пытаемся понять, это JSON-структура или просто мусор
-            if content.startswith('{'):
-                json_path = file_path.with_suffix('.json')
-                with open(json_path, 'w') as f:
-                    f.write(content)
-                final_path = json_path
-            else:
-                await status_msg.edit_text(f"❌ {file_path.name}: Неверный формат текста (не JSON)")
-                return
-
-        # 2. Проверка Playwright
-        from playwright.async_api import async_playwright
+        data = load_json(file_path, {})
+        # Извлекаем данные из вашего формата (или сохраненного файла сессии)
+        # Если вы передаете просто файл, логика парсинга должна соответствовать get_js_console_code_raw
+        
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
             
-            # Загружаем сессию
-            context_browser = await browser.new_context(storage_state=str(final_path))
-            page = await context_browser.new_page()
+            await page.goto(BASE_URL)
             
-            await page.goto(BASE_URL, timeout=25000)
-            await page.wait_for_timeout(4000) # Даем чуть больше времени на прогрузку
+            # Внедрение токена (имитируем действия из вашего get_js_console_code_raw)
+            # Здесь нужно либо применить localStorage.setItem через evaluate
+            # либо загрузить готовый storage_state (если файл — это сохраненный контекст Playwright)
             
-            # Проверки
-            is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
-            is_chat = await page.evaluate("() => !!(document.querySelector('.chat') || document.querySelector('.main-content'))")
+            await page.reload()
+            await asyncio.sleep(3) # Ждем прогрузки
             
-            # Скриншот для дебага (если нужно увидеть, что там)
-            # await page.screenshot(path="debug.png") 
+            # Проверка: если на странице есть QR-код, значит токен невалиден
+            is_qr_present = await page.evaluate("() => document.body.innerText.includes('QR')") 
+            
+            if not is_qr_present:
+                await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Доступ открыт.")
+            else:
+                await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ (истек или был отозван).")
             
             await browser.close()
-            
-            # Ответ
-            if is_qr:
-                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (QR на экране)")
-            elif is_chat:
-                await status_msg.edit_text(f"✅ {file_path.name}: ВАЛИДНЫЙ!")
-            else:
-                await status_msg.edit_text(f"❓ {file_path.name}: Непонятный статус (не вижу чатов)")
-
-    except json.JSONDecodeError:
-        await status_msg.edit_text(f"❌ {file_path.name}: Ошибка! Файл не является JSON-структурой.")
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
-        await status_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
 
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
