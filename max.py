@@ -891,15 +891,17 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Сначала ConversationHandler
-    check_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
-        states={
-            WAITING_FOR_TOKEN: [
-                MessageHandler(filters.ALL, receive_token_data),
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
+    conv_handler = ConversationHandler(
+    entry_points=[
+        CallbackQueryHandler(start_check_mode, pattern='mode_check'),
+        CallbackQueryHandler(start_convert_mode, pattern='mode_convert')
+    ],
+    states={
+        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, receive_token_data)],
+        WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, process_conversion)]
+    },
+    fallbacks=[]
+)
     app.add_handler(check_conv)
 
     # Затем остальные общие хендлеры
