@@ -23,6 +23,7 @@ CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
 
 WAITING_FOR_TOKEN = 1
+WAITING_FOR_CONVERT = 2
 
 # Настройка путей под Railway Volume (/app/sessions)
 DATA_DIR = Path("/app/sessions")
@@ -164,6 +165,7 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
         [
             # Добавляем кнопку сюда
             InlineKeyboardButton("🔍 Проверить токен", callback_data="check_init")
+            [InlineKeyboardButton("🔄 Конвертировать в JSON", callback_data='mode_convert')]
         ]
     ]
     
@@ -744,6 +746,44 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.reply_text("📥 Пришлите мне файл сессии (.json) или вставьте текст токена для проверки.")
     return WAITING_FOR_TOKEN
 
+async def start_convert_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.message.reply_text("📥 Пришли мне .txt файл с JS-кодом, я превращу его в .json")
+    return WAITING_FOR_CONVERT # Переходим в режим ожидания файла
+
+async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith('.txt'):
+        await update.message.reply_text("❌ Пришли текстовый файл!")
+        return ConversationHandler.END
+
+    # Скачиваем
+    file_path = SESSIONS_DIR / doc.file_name
+    await (await doc.get_file()).download_to_drive(file_path)
+    
+    # Парсим (тот самый код, что мы делали)
+    content = file_path.read_text(encoding='utf-8', errors='ignore')
+    import re
+    match = re.search(r'__oneme_auth\',\s*\'(.*?)\'', content)
+    
+    if match:
+        auth_json = match.group(1)
+        session_data = {"localStorage": [{"name": "__oneme_auth", "value": auth_json}]}
+        
+        # Сохраняем готовый JSON
+        json_filename = doc.file_name.replace('.txt', '.json')
+        json_path = SESSIONS_DIR / json_filename
+        with open(json_path, 'w') as f:
+            json.dump(session_data, f)
+            
+        # Отправляем обратно
+        await update.message.reply_document(document=open(json_path, 'rb'))
+        os.remove(json_path) # Удаляем после отправки
+        os.remove(file_path)
+    else:
+        await update.message.reply_text("❌ Не нашел токен в этом файле.")
+    
+    return ConversationHandler.END
+    
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если это сообщение с одним файлом
     if update.message.document:
