@@ -203,7 +203,9 @@ async def wait_success_login(page) -> None:
     await page.wait_for_function("""() => { const t = document.body ? document.body.innerText.toLowerCase() : ''; return !(t.includes('qr') || t.includes('сканируйте') || t.includes('войдите')); }""", timeout=180000)
 
 async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю сессию, подождите...")
+    # Если это TXT, нам нужно вытащить данные между кавычками для __oneme_auth
+    if file_path.suffix == '.txt':
+        content = file_path.read_text(encoding='utf-8')
     
     # 1. Проверка: существует ли файл и не пустой ли он
     if not file_path.exists() or file_path.stat().st_size == 0:
@@ -683,29 +685,50 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
-    # 1. Если прислали файл
+    # Собираем все файлы: документы и даже если прислали просто текст
+    files_to_process = []
+    
     if update.message.document:
-        file = await update.message.document.get_file()
-        temp_path = SESSIONS_DIR / f"temp_{chat_id}.json"
+        files_to_process.append(update.message.document)
+    
+    # Если бот должен поддерживать "прислать 5 файлов сразу", 
+    # в Telegram для обработки нескольких файлов лучше использовать album
+    if update.message.media_group_id:
+        # Для простоты: если прислали группу, лучше работать через 
+        # handler, который собирает их в медиа-группу, 
+        # но для начала сделаем обработку текущего файла
+        pass
+
+    for file_doc in files_to_process:
+        file = await file_doc.get_file()
+        file_name = file_doc.file_name.lower()
+        temp_path = SESSIONS_DIR / f"temp_{chat_id}_{file_name}"
         await file.download_to_drive(temp_path)
+
+        # 1. Если это ZIP — распаковываем
+        if file_name.endswith(".zip"):
+            extract_path = SESSIONS_DIR / f"extract_{chat_id}"
+            with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+            
+            # Проходим по всем файлам в архиве
+            for path in extract_path.rglob('*'):
+                if path.is_file() and path.suffix in ['.json', '.txt']:
+                    await check_token_validity(chat_id, path, context)
+            
+            # Чистим папку экстракта
+            shutil.rmtree(extract_path)
+            
+        # 2. Если это JSON или TXT — проверяем
+        elif file_name.endswith(('.json', '.txt')):
+            await check_token_validity(chat_id, temp_path, context)
         
-        # Запускаем проверку
-        await check_token_validity(chat_id, temp_path, context)
-        
-        # Удаляем временный файл после проверки
+        # Удаляем временный файл
         if temp_path.exists():
             os.remove(temp_path)
-            
-    # 2. Если прислали текст (вдруг токен текстом)
-    else:
-        await update.message.reply_text("❌ Пожалуйста, отправьте именно файл сессии (.json).")
-        return ConversationHandler.END
 
-    # Возвращаем пользователя в главное меню после проверки
-    welcome_text, reply_kb = main_menu_content(chat_id)
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-    
-    return ConversationHandler.END # Завершаем диалог
+    await update.message.reply_text("✅ Проверка завершена.")
+    return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
