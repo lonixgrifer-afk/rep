@@ -237,7 +237,7 @@ async def check_token_validity(chat_id: int, file_path: Path, context: ContextTy
                 # ВАЖНО: передаем строку пути к JSON
                 ctx = await browser.new_context(storage_state=str(target_path))
                 page = await ctx.new_page()
-                await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+                await page.goto(BASE_URL, wait_until="networkidle", timeout=10000)
                 
                 is_qr_present = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
                 
@@ -759,27 +759,38 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (код получения файла)
+    chat_id = update.effective_chat.id
+    status_msg = await update.message.reply_text("⏳ Подготовка файлов...")
     
-    file_doc = update.message.document
-    file_name = file_doc.file_name.lower()
+    # 1. Сначала скачиваем/распаковываем ВСЕ файлы в список
+    # Допустим, мы скачали файлы в папку SESSIONS_DIR / "temp_files"
+    files_to_check = [f for f in (SESSIONS_DIR / "temp_files").iterdir() if f.suffix in ['.json', '.txt']]
     
-    # ПРОВЕРКА НА ZIP
-    if file_name.endswith('.zip'):
-        await update.message.reply_text("📦 Обнаружен архив, распаковываю...")
-        extract_path = SESSIONS_DIR / f"extract_{chat_id}"
-        with zipfile.ZipFile(temp_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
+    if not files_to_check:
+        await status_msg.edit_text("❌ Файлов для проверки не найдено.")
+        return
+
+    # 2. Запускаем браузер ОДИН РАЗ
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context()
         
-        # Проверяем файлы внутри
-        for path in extract_path.rglob('*'):
-            if path.is_file() and path.suffix in ['.json', '.txt']:
-                await check_token_validity(chat_id, path, context)
-        shutil.rmtree(extract_path)
+        results = []
+        # 3. Идем по списку файлов и используем один и тот же браузер (ctx)
+        for f in files_to_check:
+            await status_msg.edit_text(f"⏳ Проверяю: {f.name}...")
+            
+            # Вызываем функцию проверки для каждого файла
+            res = await check_single_file(ctx, f, status_msg)
+            results.append(f"{f.name}: {res}")
         
-    else:
-        # Это обычный файл (.txt или .json)
-        await check_token_validity(chat_id, temp_path, context)
+        await browser.close()
+    
+    # 4. Выводим итоговый результат
+    await status_msg.edit_text("✅ Готово!\n\n" + "\n".join(results))
+
+    
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
