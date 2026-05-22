@@ -210,36 +210,43 @@ def save_json(path, data):
 async def check_token_validity(chat_id, file_path, context, status_msg):
     print(f"DEBUG: Начало функции для {file_path.name}")
     try:
-        # Проверка 1: Файл существует?
         if not file_path.exists():
-            await status_msg.edit_text("❌ Файл не найден на сервере!")
+            await status_msg.edit_text("❌ Файл не найден!")
             return
 
-        # Проверка 2: Запуск браузера
-        print("DEBUG: Запускаю Playwright...")
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            print("DEBUG: Браузер запущен")
             
-            page = await browser.new_page()
+            # --- ВАЖНО: Создаем контекст С ТВОИМ ФАЙЛОМ СЕССИИ ---
+            # Без этой строки браузер просто открывает чистый сайт
+            context_browser = await browser.new_context(storage_state=str(file_path))
+            page = await context_browser.new_page()
+            
             print("DEBUG: Перехожу на сайт...")
-            
             await page.goto(BASE_URL, timeout=20000)
-            print("DEBUG: Сайт загружен")
             
-            # Логика проверки
+            # Ждем 2 секунды, чтобы прогрузились данные
+            await page.wait_for_timeout(2000)
+            
+            # Логика: если есть QR или Canvas - токен дохлый
             is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
+            
+            # Логика: если есть элементы чата - токен живой
+            is_chat = await page.evaluate("() => !!(document.querySelector('.chat') || document.querySelector('.main-content'))")
+            
             await browser.close()
             
+            # Итоговая проверка
             if is_qr:
-                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (QR)")
+                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (есть QR)")
+            elif is_chat:
+                await status_msg.edit_text(f"✅ {file_path.name}: ВАЛИДНЫЙ!")
             else:
-                await status_msg.edit_text(f"✅ {file_path.name}: Валидный!")
-            print("DEBUG: Успешно проверено")
+                await status_msg.edit_text(f"❓ {file_path.name}: Непонятный статус (не вижу ни чатов, ни QR)")
 
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}") # Вот это самое важное!
+        print(f"CRITICAL ERROR: {str(e)}")
         await status_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
 
 # Возвращает содержимое файла сессии (JSON)
@@ -756,6 +763,8 @@ async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Запускаем проверку прямо сейчас
     # Используем одну функцию, которая запускает браузер, проверяет и закрывает его
     # (Или лучше: запускай браузер внутри check_token_validity)
+    # Было: await check_token_validity(chat_id, file_path, context)
+# Стало:
     await check_token_validity(update.effective_chat.id, file_path, context, status_msg)
 
     # Удаляем файл
