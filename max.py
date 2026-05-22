@@ -4,6 +4,7 @@ import urllib.request
 import zipfile
 import urllib.parse
 import asyncio
+from telegram.ext import ConversationHandler
 import shutil
 from datetime import datetime
 from io import BytesIO
@@ -17,6 +18,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyN
 CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "584628:AAoCvpqJjjLh1PlsKRUNUyz17SmTF6WW6Kh")
 CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 BASE_URL = "https://web.max.ru"
+
+WAITING_FOR_TOKEN = 1
 
 # Настройка путей под Railway Volume (/app/sessions)
 DATA_DIR = Path("/app/sessions")
