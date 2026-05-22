@@ -760,18 +760,17 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Сначала ConversationHandler (он специфичен)
+    # Сначала ConversationHandler
     check_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
         states={
             WAITING_FOR_TOKEN: [
                 MessageHandler(filters.Document.ALL, receive_token_data),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data),
-                CallbackQueryHandler(callback_router) 
+                CallbackQueryHandler(callback_router)
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
-    ) # Только одна скобка здесь
     )
     app.add_handler(check_conv)
 
