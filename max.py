@@ -195,6 +195,28 @@ async def capture_qr_image(page) -> bytes:
 async def wait_success_login(page) -> None:
     await page.wait_for_function("""() => { const t = document.body ? document.body.innerText.toLowerCase() : ''; return !(t.includes('qr') || t.includes('сканируйте') || t.includes('войдите')); }""", timeout=180000)
 
+async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю сессию, подождите...")
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            # Загружаем состояние сессии из файла
+            ctx = await browser.new_context(storage_state=str(file_path))
+            page = await ctx.new_page()
+            await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+            
+            # Простая проверка: если на странице есть QR или слово "Войдите", значит сессия невалидна
+            is_qr_present = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
+            await browser.close()
+            
+            if not is_qr_present:
+                await status_msg.edit_text("✅ **Токен ВАЛИДНЫЙ!** Сессия активна.")
+            else:
+                await status_msg.edit_text("❌ **Токен НЕВАЛИДНЫЙ.** Требуется авторизация.")
+    except Exception as e:
+        await status_msg.edit_text(f"⚠️ Ошибка проверки: {str(e)}")
+        
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
     
@@ -638,6 +660,7 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Сначала ConversationHandler (он специфичен)
     check_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
         states={
@@ -648,16 +671,16 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
-    
     app.add_handler(check_conv)
-    # ... остальные ваши хендлеры ...
-    
+
+    # Затем остальные общие хендлеры
     app.add_handler(CommandHandler("getdata", export_data_archive))
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(CallbackQueryHandler(callback_router)) # Этот ловит остальные кнопки
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
+    # ...
     # Запускаем поллинг инвойсов каждые 15 секунд
     if app.job_queue:
         app.job_queue.run_repeating(check_invoices_job, interval=15, first=10)
