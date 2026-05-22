@@ -759,32 +759,27 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    # 1. Получаем файл
-    if not update.message.document:
-        await update.message.reply_text("❌ Пришлите файл (.json или .txt).")
-        return ConversationHandler.END
-
+    # ... (код получения файла)
+    
     file_doc = update.message.document
     file_name = file_doc.file_name.lower()
     
-    # ПРИНУДИТЕЛЬНО скачиваем, если это документ, не глядя на расширение
-    file = await file_doc.get_file()
-    temp_path = SESSIONS_DIR / f"temp_{chat_id}_{file_name}"
-    await file.download_to_drive(temp_path)
-    
-    print(f"DEBUG: Файл скачан: {temp_path}") # Проверьте логи Railway!
-    
-    # 2. Вызываем проверку
-    await check_token_validity(chat_id, temp_path, context)
-    
-    # 3. Удаляем временный файл
-    if temp_path.exists():
-        os.remove(temp_path)
+    # ПРОВЕРКА НА ZIP
+    if file_name.endswith('.zip'):
+        await update.message.reply_text("📦 Обнаружен архив, распаковываю...")
+        extract_path = SESSIONS_DIR / f"extract_{chat_id}"
+        with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
         
-    return ConversationHandler.END
-
+        # Проверяем файлы внутри
+        for path in extract_path.rglob('*'):
+            if path.is_file() and path.suffix in ['.json', '.txt']:
+                await check_token_validity(chat_id, path, context)
+        shutil.rmtree(extract_path)
+        
+    else:
+        # Это обычный файл (.txt или .json)
+        await check_token_validity(chat_id, temp_path, context)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
