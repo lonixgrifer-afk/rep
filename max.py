@@ -216,28 +216,28 @@ async def check_token_validity(chat_id, file_path, context, status_msg):
 
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
+            # Запуск браузера
             browser = await p.chromium.launch(headless=True)
             
-            # --- ВАЖНО: Создаем контекст С ТВОИМ ФАЙЛОМ СЕССИИ ---
-            # Без этой строки браузер просто открывает чистый сайт
+            # Создаем контекст С ФАЙЛОМ СЕССИИ
+            # Если это .txt, то код не сработает (нужен .json), 
+            # поэтому убедись, что file_path ведет на .json
             context_browser = await browser.new_context(storage_state=str(file_path))
             page = await context_browser.new_page()
             
             print("DEBUG: Перехожу на сайт...")
             await page.goto(BASE_URL, timeout=20000)
             
-            # Ждем 2 секунды, чтобы прогрузились данные
-            await page.wait_for_timeout(2000)
+            # Ждем прогрузки
+            await page.wait_for_timeout(3000) 
             
-            # Логика: если есть QR или Canvas - токен дохлый
+            # Логика поиска
             is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
-            
-            # Логика: если есть элементы чата - токен живой
             is_chat = await page.evaluate("() => !!(document.querySelector('.chat') || document.querySelector('.main-content'))")
             
             await browser.close()
             
-            # Итоговая проверка
+            # Результаты
             if is_qr:
                 await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (есть QR)")
             elif is_chat:
@@ -748,13 +748,18 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Берем документ из текущего сообщения
     doc = update.message.document
     if not doc:
         return ConversationHandler.END
 
-    # Сразу пишем, что начали проверку именно этого файла
-    status_msg = await update.message.reply_text(f"🔍 Начинаю проверку файла: {doc.file_name}...")
+    # ПРОВЕРКА: Если файл не .json, бот даже не будет тратить время
+    if not doc.file_name.lower().endswith('.json'):
+        await update.message.reply_text(f"❌ {doc.file_name}: Я принимаю только .json файлы сессий!")
+        return WAITING_FOR_TOKEN
+
+    status_msg = await update.message.reply_text(f"🔍 Начинаю проверку: {doc.file_name}...")
+    
+    # ... дальше твой код скачивания и вызова check_token_validity ...
 
     # Скачиваем файл
     file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
