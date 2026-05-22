@@ -163,9 +163,8 @@ def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("🗄️ Мои сессии", callback_data="session:list")
         ],
         [
-            # Добавляем кнопку сюда
-            InlineKeyboardButton("🔍 Проверить токен", callback_data="check_init")
-            [InlineKeyboardButton("🔄 Конвертировать в JSON", callback_data='mode_convert')]
+            InlineKeyboardButton("🔍 Проверить токен", callback_data="check_init"), # Добавлена запятая
+            InlineKeyboardButton("🔄 Конвертировать в JSON", callback_data='mode_convert')
         ]
     ]
     
@@ -891,6 +890,19 @@ async def start_check_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.reply_text("📥 Пришли мне файл:")
     return WAITING_FOR_TOKEN # Убедись, что это состояние у тебя определено
     
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    doc = update.message.document
+    
+    # Сохраняем файл во временную директорию
+    file_path = SESSIONS_DIR / doc.file_name
+    await (await doc.get_file()).download_to_drive(custom_path=file_path)
+    
+    # Передаем файл в вашу функцию проверки
+    await check_token_validity(chat_id, file_path, context)
+    
+    return ConversationHandler.END
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -921,8 +933,6 @@ def main() -> None:
         app.job_queue.run_repeating(check_invoices_job, interval=15, first=10)
 
     print("🤖 Бот успешно запущен!")
-# В функции main(), перед запуском апдейтера:
-# Удаляем любой старый Webhook, который может мешать
     app.bot.delete_webhook(drop_pending_updates=True)
     app.run_polling()
 
