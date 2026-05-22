@@ -4,6 +4,7 @@ import urllib.request
 import zipfile
 import urllib.parse
 import asyncio
+import re
 import logging
 logging.basicConfig(level=logging.INFO)
 from telegram.ext import ConversationHandler
@@ -179,7 +180,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     ])
     
 def session_menu(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_all")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_choice")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
 def get_js_console_code_raw(file_path: Path) -> str:
     try:
@@ -202,31 +203,39 @@ async def capture_qr_image(page) -> bytes:
 async def wait_success_login(page) -> None:
     await page.wait_for_function("""() => { const t = document.body ? document.body.innerText.toLowerCase() : ''; return !(t.includes('qr') || t.includes('сканируйте') || t.includes('войдите')); }""", timeout=180000)
 
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4)
+
 async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    # Если это TXT, нам нужно вытащить данные между кавычками для __oneme_auth
-    if file_path.suffix == '.txt':
-        content = file_path.read_text(encoding='utf-8')
+    status_msg = await context.bot.send_message(chat_id, "🔍 Анализирую файл...")
     
-    # 1. Проверка: существует ли файл и не пустой ли он
-    if not file_path.exists() or file_path.stat().st_size == 0:
-        await status_msg.edit_text("❌ Ошибка: Файл пуст или поврежден.")
-        return
-
-    # 2. Проверка: можно ли его прочитать как JSON (защита от неверного формата)
+    # 1. Подготовка файла: если .txt, конвертируем в .json
+    final_json_path = file_path.with_suffix(".json")
+    
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            json.load(f)
-    except json.JSONDecodeError:
-        await status_msg.edit_text("❌ Ошибка: Это не валидный JSON файл. Пришлите правильный файл сессии.")
-        return
+        if file_path.suffix == '.txt':
+            content = file_path.read_text(encoding='utf-8')
+            data = parse_txt_to_json(content)
+            if not data:
+                await status_msg.edit_text("❌ Ошибка: Не удалось распарсить TXT-файл. Проверьте формат.")
+                return
+            save_json(final_json_path, data)
+        else:
+            final_json_path = file_path
 
-    # 3. Основная логика проверки Playwright
-    try:
+        # 2. Проверка: существует ли файл и не пустой ли он
+        if not final_json_path.exists() or final_json_path.stat().st_size == 0:
+            await status_msg.edit_text("❌ Ошибка: Файл пуст или поврежден.")
+            return
+
+        # 3. Основная логика Playwright
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             try:
-                ctx = await browser.new_context(storage_state=str(file_path))
+                # Используем final_json_path для контекста
+                ctx = await browser.new_context(storage_state=str(final_json_path))
                 page = await ctx.new_page()
                 await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
                 
@@ -239,9 +248,14 @@ async def check_token_validity(chat_id: int, file_path: Path, context: ContextTy
                     await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ. Требуется авторизация.")
             except Exception as e:
                 await browser.close()
-                raise e # Проброс ошибки во внешний try
+                raise e
+                
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка при чтении сессии: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Ошибка при проверке сессии: {str(e)}")
+    
+    # Если мы создавали временный .json из .txt, удалим его
+    if file_path.suffix == '.txt' and final_json_path.exists():
+        os.remove(final_json_path)
 
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
@@ -264,7 +278,25 @@ def get_js_console_code(file_path: Path) -> str:
             "window.location.reload();"
         )
     except Exception: return ""
+
+def parse_txt_to_json(txt_content: str) -> dict:
+    """Извлекает данные из JS-кода и превращает в структуру для storage_state"""
+    auth = re.search(r"localStorage\.setItem\('__oneme_auth',\s*'(.+?)'\);", txt_content)
+    device_id = re.search(r"localStorage\.setItem\('__oneme_device_id',\s*'(.+?)'\);", txt_content)
+    
+    if not auth or not device_id:
+        return None
         
+    return {
+        "origins": [{
+            "origin": BASE_URL,
+            "localStorage": [
+                {"name": "__oneme_auth", "value": auth.group(1)},
+                {"name": "__oneme_device_id", "value": device_id.group(1)}
+            ]
+        }]
+    }
+
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
     
@@ -485,6 +517,47 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("📥 Пришлите мне файл сессии (.json) для проверки.\n\nИли напишите /cancel для отмены.")
         return WAITING_FOR_TOKEN # Это переведет пользователя в состояние ожидания файла
         
+    # В callback_router:
+    
+    elif data == "session:export_choice":
+        # Спрашиваем формат для массовой выгрузки
+        kb = [
+            [InlineKeyboardButton("📜 .txt (Скрипты)", callback_data="session:export_all:txt")],
+            [InlineKeyboardButton("⚙️ .json (Сессии)", callback_data="session:export_all:json")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="session:list")]
+        ]
+        await query.edit_message_text("Выберите формат для архива со всеми сессиями:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("session:export_all:"):
+        fmt = data.split(":")[2] # txt или json
+        sessions = chat_sessions(chat_id)
+        if not sessions:
+            await query.answer("❌ Нет сессий для выгрузки.", show_alert=True)
+            return
+
+        await query.message.reply_text(f"⏳ Формирую ZIP с файлами {fmt}...")
+        
+        zip_filename = f"all_sessions_{chat_id}_{fmt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        zp = Path("/tmp") / zip_filename
+        
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for s in sessions:
+                # Генерируем контент в зависимости от выбора
+                if fmt == "txt":
+                    content = get_js_console_code(s)
+                    arc_name = s.name.replace(".json", ".txt")
+                else:
+                    content = get_raw_json(s)
+                    arc_name = s.name
+                
+                # Пишем файл в архив
+                zf.writestr(arc_name, content)
+        
+        with open(zp, "rb") as f:
+            await query.message.reply_document(document=f, filename=zip_filename, caption=f"📦 Архив всех сессий в формате {fmt}.")
+        
+        if zp.exists(): os.remove(zp)
+
     elif data == "ref:menu":
         uname = (await context.bot.get_me()).username
         u = get_user(chat_id)
@@ -683,7 +756,9 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    file_name = update.message.document.file_name
+    print(f"DEBUG: Получен файл {file_name}") # Это появится в логах Railway
+    # ...
     
     # Собираем все файлы: документы и даже если прислали просто текст
     files_to_process = []
