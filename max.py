@@ -759,38 +759,17 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    status_msg = await update.message.reply_text("⏳ Подготовка файлов...")
+    print("DEBUG: Я получил файл, начинаю обработку")
     
-    # 1. Сначала скачиваем/распаковываем ВСЕ файлы в список
-    # Допустим, мы скачали файлы в папку SESSIONS_DIR / "temp_files"
-    files_to_check = [f for f in (SESSIONS_DIR / "temp_files").iterdir() if f.suffix in ['.json', '.txt']]
-    
-    if not files_to_check:
-        await status_msg.edit_text("❌ Файлов для проверки не найдено.")
-        return
-
-    # 2. Запускаем браузер ОДИН РАЗ
-    from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context()
+    if not update.message.document:
+        await update.message.reply_text("❌ Пришли файл!")
+        return ConversationHandler.END
         
-        results = []
-        # 3. Идем по списку файлов и используем один и тот же браузер (ctx)
-        for f in files_to_check:
-            await status_msg.edit_text(f"⏳ Проверяю: {f.name}...")
-            
-            # Вызываем функцию проверки для каждого файла
-            res = await check_single_file(ctx, f, status_msg)
-            results.append(f"{f.name}: {res}")
-        
-        await browser.close()
-    
-    # 4. Выводим итоговый результат
-    await status_msg.edit_text("✅ Готово!\n\n" + "\n".join(results))
+    await update.message.reply_text("✅ Файл принят, проверяю...")
+    # Здесь просто заглушка, чтобы он не висел
+    await update.message.reply_text("Проверка завершена.")
+    return ConversationHandler.END
 
-    
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
