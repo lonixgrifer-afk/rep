@@ -737,14 +737,19 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если это сообщение с одним файлом
-    if update.message.document:
-        files = [update.message.document]
-    else:
-        await update.message.reply_text("❌ Пришлите файл.")
-        return ConversationHandler.END
-
-    await update.message.reply_text(f"🚀 Принято файлов: {len(files)}. Начинаю проверку...")
+    # Если в данных пользователя нет списка, создаем его
+    if 'files_to_check' not in context.user_data:
+        context.user_data['files_to_check'] = []
+    
+    # Добавляем документ в список
+    doc = update.message.document
+    context.user_data['files_to_check'].append(doc)
+    
+    # Даем боту 3 секунды, чтобы он "подождал" остальные файлы группы
+    # Если за 3 секунды новых файлов не пришло, запускаем проверку
+    context.job_queue.run_once(process_files_job, 3, chat_id=update.effective_chat.id)
+    
+    await update.message.reply_text(f"📥 Файл {doc.file_name} в очереди (всего: {len(context.user_data['files_to_check'])}). Жду еще...")
 
     for doc in files:
         file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
@@ -766,6 +771,22 @@ async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ Все файлы обработаны.")
     return ConversationHandler.END
 
+async def process_files_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    files = context.user_data.get('files_to_check', [])
+    
+    if not files:
+        return
+
+    await context.bot.send_message(chat_id, "🚀 Принято файлов: " + str(len(files)) + ". Начинаю проверку...")
+    
+    # Здесь логика запуска браузера ОДИН РАЗ и проход по циклу for (как мы обсуждали выше)
+    # ... (логика с async with async_playwright() ...)
+    
+    # ОЧИСТКА после проверки
+    context.user_data['files_to_check'] = []
+
+    
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
