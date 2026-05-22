@@ -207,58 +207,36 @@ def save_json(path, data):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
-async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await context.bot.send_message(chat_id, "🔍 Подготовка и анализ файла...")
-    
-    # Определяем путь для Playwright
-    # Если это .txt, мы создадим .json. Если .json - оставим как есть.
-    target_path = file_path
-    is_temp_file = False
-
+async def check_token_validity(chat_id, file_path, context):
     try:
-        # 1. Если TXT — парсим в JSON
-        if file_path.suffix.lower() == '.txt':
-            content = file_path.read_text(encoding='utf-8')
+        # Если TXT - превращаем в JSON, чтобы Playwright его сожрал
+        if file_path.suffix == '.txt':
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
             data = parse_txt_to_json(content)
-            if not data:
-                await status_msg.edit_text("❌ Ошибка: Не удалось извлечь токен из TXT-файла.")
-                return
-            
-            target_path = file_path.with_suffix(".json")
-            with open(target_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f)
-            is_temp_file = True # Пометим для удаления
-        
-        # 2. Теперь проверка Playwright
+            final_path = file_path.with_suffix(".json")
+            with open(final_path, 'w') as f: json.dump(data, f)
+        else:
+            final_path = file_path
+
+        # Запуск Playwright
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            try:
-                # ВАЖНО: передаем строку пути к JSON
-                ctx = await browser.new_context(storage_state=str(target_path))
-                page = await ctx.new_page()
-                await page.goto(BASE_URL, wait_until="networkidle", timeout=10000)
+            ctx = await browser.new_context(storage_state=str(final_path))
+            page = await ctx.new_page()
+            await page.goto(BASE_URL, timeout=15000)
+            
+            # Проверка QR
+            is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
+            await browser.close()
+            
+            if is_qr:
+                await context.bot.send_message(chat_id, "❌ Токен дохлый (QR на экране).")
+            else:
+                await context.bot.send_message(chat_id, "✅ Токен ВАЛИДНЫЙ!")
                 
-                is_qr_present = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
-                
-                if not is_qr_present:
-                    await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Сессия активна.")
-                else:
-                    await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ. Требуется авторизация.")
-            finally:
-                await browser.close()
-
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
-    
-    finally:
-        # 3. Чистим за собой
-        if is_temp_file and target_path.exists():
-            os.remove(target_path)
-    
-    # Если мы создавали временный .json из .txt, удалим его
-    if file_path.suffix == '.txt' and final_json_path.exists():
-        os.remove(final_json_path)
+        await context.bot.send_message(chat_id, f"⚠️ Ошибка: {e}")
 
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
@@ -759,15 +737,23 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("DEBUG: Я получил файл, начинаю обработку")
+    chat_id = update.effective_chat.id
     
-    if not update.message.document:
-        await update.message.reply_text("❌ Пришли файл!")
-        return ConversationHandler.END
+    # 1. Берем документ
+    file_doc = update.message.document
+    file_path = SESSIONS_DIR / f"temp_{chat_id}_{file_doc.file_name}"
+    await (await file_doc.get_file()).download_to_drive(file_path)
+    
+    await update.message.reply_text("🔍 Анализирую файл...")
+    
+    # 2. Вызываем проверку (которая запускает Playwright)
+    # Вот тут вызываем твою функцию проверки, которую мы правили
+    await check_token_validity(chat_id, file_path, context)
+    
+    # 3. Убираем мусор
+    if file_path.exists():
+        os.remove(file_path)
         
-    await update.message.reply_text("✅ Файл принят, проверяю...")
-    # Здесь просто заглушка, чтобы он не висел
-    await update.message.reply_text("Проверка завершена.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
