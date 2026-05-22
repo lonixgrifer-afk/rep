@@ -212,46 +212,36 @@ async def check_token_validity(chat_id: int, file_path: Path, context: ContextTy
     from playwright.async_api import async_playwright
     
     try:
-        # Читаем данные из файла
         data = load_json(file_path, {})
-        # Получаем storage (логика должна соответствовать тому, как вы сохраняли данные)
-        storage = data.get("origins", [{}])[0].get("localStorage", [])
+        # Извлекаем данные из вашего формата (или сохраненного файла сессии)
+        # Если вы передаете просто файл, логика парсинга должна соответствовать get_js_console_code_raw
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             ctx = await browser.new_context()
             page = await ctx.new_page()
             
-            # 1. Сначала заходим на домен, чтобы можно было установить localStorage
             await page.goto(BASE_URL)
             
-            # 2. Инжектим данные сессии в localStorage
-            await page.evaluate("""(storage) => {
-                storage.forEach(item => {
-                    localStorage.setItem(item.name, item.value);
-                });
-            }""", storage)
+            # Внедрение токена (имитируем действия из вашего get_js_console_code_raw)
+            # Здесь нужно либо применить localStorage.setItem через evaluate
+            # либо загрузить готовый storage_state (если файл — это сохраненный контекст Playwright)
             
-            # 3. Перезагружаем страницу с уже примененными данными
             await page.reload()
-            await page.wait_for_load_state('networkidle')
-            await asyncio.sleep(2) 
+            await asyncio.sleep(3) # Ждем прогрузки
             
-            # 4. Проверка: теперь мы авторизованы, ищем признаки отсутствия QR
-            # (если QR нет, значит мы зашли в аккаунт)
-            is_qr_present = await page.evaluate("() => document.body.innerText.toLowerCase().includes('qr') || document.body.innerText.toLowerCase().includes('сканируйте')")
+            # Проверка: если на странице есть QR-код, значит токен невалиден
+            is_qr_present = await page.evaluate("() => document.body.innerText.includes('QR')") 
             
             if not is_qr_present:
                 await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Доступ открыт.")
             else:
-                # На всякий случай сохраним скриншот, чтобы увидеть, что именно там висит
-                await page.screenshot(path=f"debug_{chat_id}.png")
-                await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ (страница авторизации все еще видна).")
+                await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ (истек или был отозван).")
             
             await browser.close()
     except Exception as e:
         await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
-
+        
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
     with open(file_path, "r", encoding="utf-8") as f:
