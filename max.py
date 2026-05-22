@@ -743,8 +743,8 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_TOKEN
 
 async def start_convert_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("📥 Пришли мне .txt файл с JS-кодом, я превращу его в .json")
-    return WAITING_FOR_CONVERT # Переходим в режим ожидания файла
+    await update.callback_query.message.reply_text("📥 Пришлите файл .json для конвертации:")
+    return WAITING_FOR_CONVERT
 
 async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -901,21 +901,43 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. ВАЖНО: Выходим из состояния ожидания файла
     return ConversationHandler.END
 
+async def handle_convert_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    if not file.file_name.endswith('.json'):
+        await update.message.reply_text("❌ Пожалуйста, пришлите файл в формате .json")
+        return ConversationHandler.END
+    
+    new_file = await context.bot.get_file(file.file_id)
+    file_path = DATA_DIR / f"convert_{update.effective_chat.id}.json"
+    await new_file.download_to_drive(file_path)
+    
+    js_code = get_js_console_code(file_path)
+    
+    if js_code:
+        bio = BytesIO(js_code.encode("utf-8"))
+        bio.name = "converted_login.txt"
+        await update.message.reply_document(document=bio, caption="✅ Файл успешно конвертирован в скрипт!")
+    else:
+        await update.message.reply_text("❌ Не удалось считать структуру JSON. Файл поврежден или имеет неверный формат.")
+    
+    return ConversationHandler.END
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Создаем обработчик диалогов
     conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_check_mode, pattern='mode_check'), # если есть
-            CallbackQueryHandler(callback_router, pattern='check_init')
-        ],
-        states={
-            WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_file)],
-            WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, process_conversion)]
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
-    )
+    entry_points=[
+        CallbackQueryHandler(start_check_mode, pattern='check_init'),
+        CallbackQueryHandler(start_convert_mode, pattern='mode_convert') 
+    ],
+    states={
+        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_check_file)],
+        # ВСТАВЬТЕ ЭТУ СТРОКУ СЮДА:
+        WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, handle_convert_file)]
+    },
+    fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+)
 
     # 1. СНАЧАЛА добавляем conv_handler (чтобы он был первым в очереди!)
     app.add_handler(conv_handler)
