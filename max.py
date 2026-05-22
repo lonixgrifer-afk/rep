@@ -906,7 +906,7 @@ def main() -> None:
     },
     fallbacks=[]
 )
-    app.add_handler(check_conv)
+    app.add_handler(conv_handler)
 
     # Затем остальные общие хендлеры
     app.add_handler(CommandHandler("getdata", export_data_archive))
