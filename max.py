@@ -503,9 +503,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("🚀 Запускаю получение QR...")
         context.application.create_task(run_qr_process(chat_id, context))
 
+    # Внутри callback_router:
     elif data == "check_init":
-        await query.message.reply_text("📥 Пришлите мне файл сессии (.json) для проверки.\n\nИли напишите /cancel для отмены.")
-        return WAITING_FOR_TOKEN # Это переведет пользователя в состояние ожидания файла
+        await query.message.reply_text("📥 Пришлите мне файл сессии (.json) для проверки.")
+        return WAITING_FOR_TOKEN # ЭТО РАБОТАЕТ ТОЛЬКО ВНУТРИ ВХОДНЫХ ТОЧЕК CONVERSATIONHANDLER
         
     # В callback_router:
     
@@ -893,41 +894,43 @@ async def start_check_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     doc = update.message.document
-    # ... ваш код скачивания ...
-    # ... вызов check_token_validity ...
-    return ConversationHandler.END # ЭТО ОБЯЗАТЕЛЬНО
     
+    # 1. Скачиваем файл
+    file_path = SESSIONS_DIR / doc.file_name
+    await (await doc.get_file()).download_to_drive(custom_path=file_path)
+    
+    # 2. Запускаем проверку
+    await check_token_validity(chat_id, file_path, context)
+    
+    # 3. ВАЖНО: Выходим из состояния ожидания файла
+    return ConversationHandler.END
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Сначала ConversationHandler
+    # Создаем обработчик диалогов
     conv_handler = ConversationHandler(
-    entry_points=[
-        CallbackQueryHandler(start_check_mode, pattern='mode_check'),
-        CallbackQueryHandler(start_convert_mode, pattern='mode_convert')
-    ],
-    states={
-        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_file)],
-        WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, process_conversion)]
-    },
-    fallbacks=[]
-)
+        entry_points=[
+            CallbackQueryHandler(start_check_mode, pattern='mode_check'), # если есть
+            CallbackQueryHandler(callback_router, pattern='check_init')
+        ],
+        states={
+            WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_file)],
+            WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, process_conversion)]
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+    )
+
+    # 1. СНАЧАЛА добавляем conv_handler (чтобы он был первым в очереди!)
     app.add_handler(conv_handler)
 
-    # Затем остальные общие хендлеры
-    app.add_handler(CommandHandler("getdata", export_data_archive))
+    # 2. ПОТОМ все остальные обработчики
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CallbackQueryHandler(callback_router)) # Этот ловит остальные кнопки
+    app.add_handler(CallbackQueryHandler(callback_router)) 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    # ...
-    # Запускаем поллинг инвойсов каждые 15 секунд
-    if app.job_queue:
-        app.job_queue.run_repeating(check_invoices_job, interval=15, first=10)
-
     print("🤖 Бот успешно запущен!")
-    app.bot.delete_webhook(drop_pending_updates=True)
     app.run_polling()
 
 if __name__ == "__main__":
