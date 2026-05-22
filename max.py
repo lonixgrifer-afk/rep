@@ -562,6 +562,32 @@ async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при создании архива: {e}")
 
+async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.message.reply_text("📥 Пришлите мне файл сессии (.json) или вставьте текст токена для проверки.")
+    return WAITING_FOR_TOKEN
+
+async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    # Если прислали файл
+    if update.message.document:
+        file = await update.message.document.get_file()
+        temp_path = SESSIONS_DIR / f"temp_{chat_id}.json"
+        await file.download_to_drive(temp_path)
+        await check_token_validity(chat_id, temp_path, context)
+        if temp_path.exists(): os.remove(temp_path)
+    
+    # Если прислали текст (код)
+    else:
+        # Здесь логика, если нужно проверить просто текст токена
+        await update.message.reply_text("⚠️ Пока поддерживается только отправка файла сессии.")
+    
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Отменено.")
+    return ConversationHandler.END
+    
 # --- ФОНОВАЯ ЗАЗАЧА ПРОВЕРКИ ОПЛАТЫ ---
 async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     invoices = load_invoices()
@@ -611,6 +637,20 @@ async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
+
+    check_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_check, pattern="check_init")],
+        states={
+            WAITING_FOR_TOKEN: [
+                MessageHandler(filters.Document.ALL, receive_token_data),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token_data)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
+    app.add_handler(check_conv)
+    # ... остальные ваши хендлеры ...
     
     app.add_handler(CommandHandler("getdata", export_data_archive))
     app.add_handler(CommandHandler("start", start_cmd))
