@@ -207,36 +207,40 @@ def save_json(path, data):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
-async def check_token_validity(chat_id, file_path, context):
+async def check_token_validity(chat_id, file_path, context, status_msg):
+    print(f"DEBUG: Начало функции для {file_path.name}")
     try:
-        # Если TXT - превращаем в JSON, чтобы Playwright его сожрал
-        if file_path.suffix == '.txt':
-            content = file_path.read_text(encoding='utf-8', errors='ignore')
-            data = parse_txt_to_json(content)
-            final_path = file_path.with_suffix(".json")
-            with open(final_path, 'w') as f: json.dump(data, f)
-        else:
-            final_path = file_path
+        # Проверка 1: Файл существует?
+        if not file_path.exists():
+            await status_msg.edit_text("❌ Файл не найден на сервере!")
+            return
 
-        # Запуск Playwright
+        # Проверка 2: Запуск браузера
+        print("DEBUG: Запускаю Playwright...")
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            ctx = await browser.new_context(storage_state=str(final_path))
-            page = await ctx.new_page()
-            await page.goto(BASE_URL, timeout=15000)
+            print("DEBUG: Браузер запущен")
             
-            # Проверка QR
+            page = await browser.new_page()
+            print("DEBUG: Перехожу на сайт...")
+            
+            await page.goto(BASE_URL, timeout=20000)
+            print("DEBUG: Сайт загружен")
+            
+            # Логика проверки
             is_qr = await page.evaluate("() => !!(document.body.innerText.includes('QR') || document.querySelector('canvas'))")
             await browser.close()
             
             if is_qr:
-                await context.bot.send_message(chat_id, "❌ Токен дохлый (QR на экране).")
+                await status_msg.edit_text(f"❌ {file_path.name}: Дохлый (QR)")
             else:
-                await context.bot.send_message(chat_id, "✅ Токен ВАЛИДНЫЙ!")
-                
+                await status_msg.edit_text(f"✅ {file_path.name}: Валидный!")
+            print("DEBUG: Успешно проверено")
+
     except Exception as e:
-        await context.bot.send_message(chat_id, f"⚠️ Ошибка: {e}")
+        print(f"CRITICAL ERROR: {str(e)}") # Вот это самое важное!
+        await status_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
 
 # Возвращает содержимое файла сессии (JSON)
 def get_raw_json(file_path: Path) -> str:
