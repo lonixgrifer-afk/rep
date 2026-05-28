@@ -9,16 +9,12 @@ from contextlib import closing
 from datetime import datetime, timezone
 
 
-# Один файл, без requirements.txt и .env.
-# Заполните перед запуском. Можно также передать через переменные окружения.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
-# Если список пустой, первый вошедший пользователь автоматически станет админом.
 ADMIN_TELEGRAM_IDS = [8949311928]
 
-# Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
 
 ROLE_OPERATOR = "operator"
@@ -29,6 +25,9 @@ STATUS_ASSIGNED = "assigned"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
+
+WITHDRAWAL_PENDING = "pending"
+WITHDRAWAL_DONE = "done"
 
 
 def now_iso():
@@ -87,6 +86,16 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                status TEXT NOT NULL,
+                admin_message TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
             """
         )
         migrate_schema(conn)
@@ -133,7 +142,7 @@ def migrate_schema(conn):
 
 def api(method, data=None):
     if BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
-        raise RuntimeError("Укажите BOT_TOKEN в начале bot.py или через переменную окружения BOT_TOKEN.")
+        raise RuntimeError("Укажите BOT_TOKEN через переменную окружения BOT_TOKEN.")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     body = urllib.parse.urlencode(data or {}).encode("utf-8")
     with urllib.request.urlopen(url, body, timeout=60) as response:
@@ -215,19 +224,20 @@ def main_menu_keyboard(user):
         rows.append([("📦 Моя очередь", "menu:my_queue")])
     elif user["role"] == ROLE_OPERATOR:
         rows.append([("📲 Взять номер", "menu:take_number")])
-    if user["is_admin"]:
-        rows.append([("Админ-панель", "menu:admin")])
     rows.append([("👤 Профиль", "menu:profile")])
+    if user["is_admin"]:
+        rows.append([("🛠️ Админ-панель", "menu:admin")])
     return inline_keyboard(rows)
 
 
 def admin_keyboard():
     return inline_keyboard([
         [("📊 Статистика", "admin:stats"), ("👥 Операторы", "admin:operator_stats")],
-        [("📋 Автоотчеты", "admin:auto_report")],
+        [("📋 Автоотчеты", "admin:auto_report"), ("💸 Выводы", "admin:withdrawals")],
+        [("🌐 Общая очередь", "admin:global_queue")],
         [("🎧 Выдача оператора", "admin:grant_operator")],
         [("♻️ Сброс очереди", "admin:reset_queue"), ("📣 Рассылка", "admin:broadcast")],
-        [("Блокировка", "admin:block"), ("Разблокировка", "admin:unblock")],
+        [("🚫 Блокировка", "admin:block"), ("✅ Разблокировка", "admin:unblock")],
         [("⬅️ Назад", "menu:home")],
     ])
 
@@ -235,7 +245,7 @@ def admin_keyboard():
 def supplier_number_keyboard(number_id):
     return inline_keyboard([
         [("🔁 Повтор с причиной", f"supplier:repeat:{number_id}")],
-        [("Отменить с причиной", f"supplier:cancel:{number_id}")],
+        [("❌ Отменить с причиной", f"supplier:cancel:{number_id}")],
         [("⬅️ Назад", "menu:home")],
     ])
 
@@ -243,10 +253,37 @@ def supplier_number_keyboard(number_id):
 def operator_active_keyboard(number_id):
     return inline_keyboard([
         [("🔁 Повтор сообщения", f"operator:repeat_message:{number_id}")],
-        [("✅ Встал", f"operator:done:{number_id}"), ("Не встал", f"operator:failed:{number_id}")],
+        [("✅ Встал", f"operator:done:{number_id}"), ("❌ Не встал", f"operator:failed:{number_id}")],
         [("⏭️ Скипнуть", f"operator:skip:{number_id}")],
         [("⬅️ Назад", "menu:home")],
     ])
+
+
+def money_text(value):
+    value = round(float(value), 2)
+    if value.is_integer():
+        return f"{int(value)}$"
+    return f"{value:.2f}$"
+
+
+def supplier_balance(conn, user_id):
+    done = conn.execute(
+        "SELECT COUNT(*) count FROM numbers WHERE supplier_user_id = ? AND status = ?",
+        (user_id, STATUS_DONE),
+    ).fetchone()["count"]
+    withdrawn = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) total FROM withdrawals WHERE user_id = ? AND status IN (?, ?)",
+        (user_id, WITHDRAWAL_PENDING, WITHDRAWAL_DONE),
+    ).fetchone()["total"]
+    return float(done) - float(withdrawn or 0), done
+
+
+def parse_amount(text):
+    normalized = (text or "").strip().replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", normalized):
+        return None
+    amount = float(normalized)
+    return amount if amount > 0 else None
 
 
 def get_setting(key, default=None):
@@ -386,12 +423,12 @@ def build_global_stats():
         f"👥 Пользователи: {users_total}",
         f"📦 Поставщики: {suppliers}",
         f"🎧 Операторы: {operators}",
-        f"Заблокированы: {blocked}",
+        f"🚫 Заблокированы: {blocked}",
         "",
         f"📱 Общее кол-во номеров: {total}",
         f"📤 Выдано операторам: {issued}",
         f"✅ Встали: {done}",
-        f"Не встали: {failed}",
+        f"❌ Не встали: {failed}",
         f"📩 Сообщений: {messages}",
         f"🔁 Повторов сообщений: {repeat_messages}",
     ]
@@ -407,23 +444,23 @@ def build_recent_numbers():
             FROM numbers n
             JOIN users su ON su.id = n.supplier_user_id
             LEFT JOIN users op ON op.id = n.assigned_operator_user_id
+            WHERE n.status IN (?, ?)
             ORDER BY n.id DESC
             LIMIT 15
-            """
+            """,
+            (STATUS_DONE, STATUS_FAILED),
         ).fetchall()
     lines = ["🧾 Последние номера:"]
     if not recent:
-        lines.append("пока пусто")
+        lines.append("📭 Пока пусто")
         return "\n".join(lines)
     for row in recent:
         supplier = f"@{row['supplier_username']}" if row["supplier_username"] else "без @username"
         operator = f"@{row['operator_username']}" if row["operator_username"] else "-"
         if row["status"] == STATUS_DONE:
-            result = "встал"
-        elif row["status"] == STATUS_FAILED:
-            result = "не встал"
+            result = "✅ встал"
         else:
-            result = "в работе"
+            result = "❌ не встал"
         lines.append(
             f"{row['masked_number']} | юзер {supplier} | взял {operator} | {result}"
         )
@@ -457,14 +494,14 @@ def build_operator_stats():
         ).fetchall()
     lines = ["👥 Статистика операторов"]
     if not rows:
-        lines.append("Операторов пока нет.")
+        lines.append("📭 Операторов пока нет.")
         return "\n".join(lines)
     for row in rows:
         taken = row["taken"] or 0
         done = row["done"] or 0
         handle = f"@{row['username']}" if row["username"] else "без @username"
         lines.append(
-            f"{handle}: взял {taken}, встали {done}, не встали {row['failed'] or 0}, скипы {row['skipped'] or 0}, повторы {row['repeats'] or 0}, повторы сообщений {row['repeat_messages'] or 0}"
+            f"{handle}: 📲 взял {taken}, ✅ встали {done}, ❌ не встали {row['failed'] or 0}, ⏭️ скипы {row['skipped'] or 0}, 🔁 повторы {row['repeats'] or 0}, 📩 повторы сообщений {row['repeat_messages'] or 0}"
         )
     return "\n".join(lines)
 
@@ -472,7 +509,7 @@ def build_operator_stats():
 def handle_start(chat_id, telegram_id, username=None):
     user = create_or_touch_user(telegram_id, username)
     if user["is_blocked"]:
-        send_message(chat_id, "Доступ заблокирован.")
+        send_message(chat_id, "🚫 Доступ заблокирован.")
         return
     if user["password_check"]:
         clear_state(user["id"])
@@ -498,19 +535,19 @@ def handle_text(message):
         if len(parts) == 2 and parts[1] == ADMIN_PASSWORD:
             user = set_admin(telegram_id, username)
             clear_state(user["id"])
-            send_message(chat_id, "Админ-доступ включен.", main_menu_keyboard(user))
+            send_message(chat_id, "✅ Админ-доступ включен.", main_menu_keyboard(user))
         else:
-            send_message(chat_id, "Команда: /admin пароль")
+            send_message(chat_id, "ℹ️ Команда: /admin пароль")
         return
 
     user = create_or_touch_user(telegram_id, username)
     if user["is_blocked"]:
-        send_message(chat_id, "Доступ заблокирован.")
+        send_message(chat_id, "🚫 Доступ заблокирован.")
         return
 
     if user["state"] == "login_password":
         if text != ADMIN_PASSWORD:
-            send_message(chat_id, "Пароль неверный.")
+            send_message(chat_id, "❌ Пароль неверный.")
             return
         mark_password_ok(user["id"])
         clear_state(user["id"])
@@ -524,7 +561,7 @@ def handle_text(message):
     if user["state"] == "add_number":
         numbers, bad = parse_russian_numbers(text)
         if not numbers:
-            send_message(chat_id, "Отправьте российские номера, каждый с новой строки. Формат: +79991234567 или 89991234567.")
+            send_message(chat_id, "📱 Отправьте российские номера, каждый с новой строки. Формат: +79991234567 или 89991234567.")
             return
         with closing(db()) as conn:
             for number in numbers:
@@ -538,7 +575,7 @@ def handle_text(message):
             conn.commit()
         clear_state(user["id"])
         log_event(user["id"], "numbers_added", details=f"count={len(numbers)}")
-        extra = f"\nНе добавлены: {', '.join(bad)}" if bad else ""
+        extra = f"\n⚠️ Не добавлены: {', '.join(bad)}" if bad else ""
         send_message(chat_id, f"✅ Добавлено номеров: {len(numbers)}.{extra}", main_menu_keyboard(user))
         return
 
@@ -548,6 +585,14 @@ def handle_text(message):
 
     if user["state"] in {"cancel_reason", "supplier_repeat_reason", "operator_repeat_reason", "fail_reason"}:
         save_reason(chat_id, user, text)
+        return
+
+    if user["state"] == "withdraw_amount":
+        handle_withdraw_amount(chat_id, user, text)
+        return
+
+    if user["state"] == "admin_withdrawal_message":
+        handle_admin_withdrawal_message(chat_id, user, text)
         return
 
     if user["state"] in {"grant_operator", "block_user", "unblock_user"}:
@@ -561,12 +606,68 @@ def handle_text(message):
     if looks_like_code(text):
         send_message(
             chat_id,
-            "Код не принимается текстом в боте. Используйте кнопки статуса.",
+            "⚠️ Код не принимается текстом в боте. Используйте кнопки статуса.",
             main_menu_keyboard(user),
         )
         return
 
     send_message(chat_id, "👇 Используйте inline-кнопки ниже.", main_menu_keyboard(user))
+
+
+def handle_withdraw_amount(chat_id, user, text):
+    if user["role"] != ROLE_SUPPLIER:
+        clear_state(user["id"])
+        send_message(chat_id, "⛔ Вывод доступен только поставщикам.", main_menu_keyboard(user))
+        return
+    amount = parse_amount(text)
+    if amount is None:
+        send_message(chat_id, "💸 Введите сумму вывода числом, например: 1 или 2.50")
+        return
+    with closing(db()) as conn:
+        balance, _ = supplier_balance(conn, user["id"])
+        if amount > balance:
+            send_message(chat_id, f"⚠️ Недостаточно средств. Доступно: {money_text(balance)}.")
+            return
+        conn.execute(
+            "INSERT INTO withdrawals (user_id, amount, status, created_at) VALUES (?, ?, ?, ?)",
+            (user["id"], amount, WITHDRAWAL_PENDING, now_iso()),
+        )
+        conn.commit()
+    clear_state(user["id"])
+    log_event(user["id"], "withdrawal_requested", details=f"amount={amount}")
+    send_message(chat_id, f"💸 Заявка на вывод {money_text(amount)} создана. ⏳ Ожидайте вывода.", main_menu_keyboard(user))
+
+
+def handle_admin_withdrawal_message(chat_id, admin, text):
+    if not admin["is_admin"]:
+        clear_state(admin["id"])
+        send_message(chat_id, "⛔ Нет доступа.")
+        return
+    data = state_data(admin)
+    withdrawal_id = data.get("withdrawal_id")
+    with closing(db()) as conn:
+        row = conn.execute(
+            """
+            SELECT w.*, u.telegram_id, u.username
+            FROM withdrawals w
+            JOIN users u ON u.id = w.user_id
+            WHERE w.id = ? AND w.status = ?
+            """,
+            (withdrawal_id, WITHDRAWAL_PENDING),
+        ).fetchone()
+        if not row:
+            clear_state(admin["id"])
+            send_message(chat_id, "⚠️ Заявка на вывод уже обработана или не найдена.", admin_keyboard())
+            return
+        conn.execute(
+            "UPDATE withdrawals SET status = ?, admin_message = ?, completed_at = ? WHERE id = ?",
+            (WITHDRAWAL_DONE, text, now_iso(), withdrawal_id),
+        )
+        conn.commit()
+    clear_state(admin["id"])
+    log_event(admin["id"], "withdrawal_completed", details=f"withdrawal_id={withdrawal_id}")
+    send_message(row["telegram_id"], f"💸 Ответ по выводу {money_text(row['amount'])}:\n{text}")
+    send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(row)}. Заявка убрана из выводов.", admin_keyboard())
 
 
 def save_reason(chat_id, user, text):
@@ -578,11 +679,11 @@ def save_reason(chat_id, user, text):
     if state == "cancel_reason":
         status = STATUS_CANCELLED
         event = "number_cancelled"
-        message = f"Заявка #{number_id} отменена."
+        message = f"❌ Заявка #{number_id} отменена."
     elif state == "fail_reason":
         status = STATUS_FAILED
         event = "number_failed"
-        message = f"Заявка #{number_id}: отказ сохранен."
+        message = f"❌ Заявка #{number_id}: отказ сохранен."
     elif state == "supplier_repeat_reason":
         status = None
         event = "supplier_repeat_requested"
@@ -607,13 +708,13 @@ def save_reason(chat_id, user, text):
 
     clear_state(user["id"])
     log_event(user["id"], event, number_id, reason)
-    send_message(chat_id, f"{message}\nПричина: {reason}", main_menu_keyboard(user))
+    send_message(chat_id, f"{message}\n📝 Причина: {reason}", main_menu_keyboard(user))
     if state == "operator_repeat_reason" and supplier:
-        send_message(supplier["telegram_id"], f"🔁 По заявке #{number_id} оператор запросил повтор.\nПричина: {reason}", supplier_number_keyboard(number_id))
+        send_message(supplier["telegram_id"], f"🔁 По заявке #{number_id} оператор запросил повтор.\n📝 Причина: {reason}", supplier_number_keyboard(number_id))
     if state == "supplier_repeat_reason" and operator:
-        send_message(operator["telegram_id"], f"🔁 По заявке #{number_id} поставщик запросил повтор.\nПричина: {reason}", operator_active_keyboard(number_id))
+        send_message(operator["telegram_id"], f"🔁 По заявке #{number_id} поставщик запросил повтор.\n📝 Причина: {reason}", operator_active_keyboard(number_id))
     if state == "fail_reason" and supplier:
-        send_message(supplier["telegram_id"], f"По заявке #{number_id}: отказ.\nПричина: {reason}")
+        send_message(supplier["telegram_id"], f"❌ По заявке #{number_id}: отказ.\n📝 Причина: {reason}")
 
 
 def save_supplier_message(chat_id, user, text):
@@ -621,10 +722,10 @@ def save_supplier_message(chat_id, user, text):
     number_id = data.get("number_id")
     message = text.strip()
     if looks_like_code(message):
-        send_message(chat_id, "Сообщение похоже на одноразовый код. Такой код нельзя отправлять через бота.")
+        send_message(chat_id, "⚠️ Сообщение похоже на одноразовый код. Такой код нельзя отправлять через бота.")
         return
     if not message:
-        send_message(chat_id, "Введите непустое сообщение для оператора.")
+        send_message(chat_id, "⚠️ Введите непустое сообщение для оператора.")
         return
 
     with closing(db()) as conn:
@@ -634,29 +735,29 @@ def save_supplier_message(chat_id, user, text):
         ).fetchone()
         if not row or row["supplier_user_id"] != user["id"] or not row["assigned_operator_user_id"]:
             clear_state(user["id"])
-            send_message(chat_id, "Заявка не найдена или уже не активна.", main_menu_keyboard(user))
+            send_message(chat_id, "⚠️ Заявка не найдена или уже не активна.", main_menu_keyboard(user))
             return
         operator = conn.execute("SELECT telegram_id FROM users WHERE id = ?", (row["assigned_operator_user_id"],)).fetchone()
 
     clear_state(user["id"])
     log_event(user["id"], "supplier_message_sent", number_id, "sent")
-    send_message(chat_id, f"Сообщение по заявке #{number_id} отправлено оператору.", main_menu_keyboard(user))
+    send_message(chat_id, f"✅ Сообщение по заявке #{number_id} отправлено оператору.", main_menu_keyboard(user))
     if operator:
         send_message(
             operator["telegram_id"],
-            f"Сообщение по заявке #{number_id}:\n{message}",
+            f"📩 Сообщение по заявке #{number_id}:\n{message}",
             operator_active_keyboard(number_id),
         )
 
 
 def handle_admin_text_state(chat_id, admin, text):
     if not admin["is_admin"]:
-        send_message(chat_id, "Нет доступа.")
+        send_message(chat_id, "⛔ Нет доступа.")
         return
     target = get_user_by_handle(text)
     if not target:
         clear_state(admin["id"])
-        send_message(chat_id, "Пользователь не найден. Укажите @username.", admin_keyboard())
+        send_message(chat_id, "⚠️ Пользователь не найден. Укажите @username.", admin_keyboard())
         return
 
     if admin["state"] == "grant_operator":
@@ -666,7 +767,7 @@ def handle_admin_text_state(chat_id, admin, text):
         with closing(db()) as conn:
             conn.execute("UPDATE users SET is_blocked = 1 WHERE id = ?", (target["id"],))
             conn.commit()
-        action_text = f"Пользователь {user_handle(target)} заблокирован."
+        action_text = f"🚫 Пользователь {user_handle(target)} заблокирован."
     else:
         with closing(db()) as conn:
             conn.execute("UPDATE users SET is_blocked = 0 WHERE id = ?", (target["id"],))
@@ -680,7 +781,7 @@ def handle_admin_text_state(chat_id, admin, text):
 
 def handle_broadcast_text(chat_id, admin, text):
     if not admin["is_admin"]:
-        send_message(chat_id, "Нет доступа.")
+        send_message(chat_id, "⛔ Нет доступа.")
         return
     sent = 0
     with closing(db()) as conn:
@@ -704,7 +805,7 @@ def handle_callback(callback):
     data = callback["data"]
     user = create_or_touch_user(telegram_id, extract_username(tg_from))
     if user["is_blocked"] or not user["password_check"]:
-        answer_callback(callback_id, "Сначала войдите по паролю.", True)
+        answer_callback(callback_id, "🔐 Сначала войдите по паролю.", True)
         return
 
     if data.startswith("menu:"):
@@ -719,6 +820,12 @@ def handle_callback(callback):
     if data.startswith("admin:"):
         handle_admin_callback(callback_id, chat_id, user, data)
         return
+    if data.startswith("queue:"):
+        handle_queue_callback(callback_id, chat_id, user, data)
+        return
+    if data.startswith("withdrawal:"):
+        handle_withdrawal_callback(callback_id, chat_id, user, data)
+        return
     answer_callback(callback_id)
 
 
@@ -728,6 +835,8 @@ def handle_menu_callback(callback_id, chat_id, user, data):
         show_home(chat_id, user)
     elif action == "profile":
         show_profile(chat_id, user)
+    elif action == "withdraw":
+        withdraw_start(chat_id, user)
     elif action == "add_number":
         add_number_start(chat_id, user)
     elif action == "my_numbers":
@@ -738,9 +847,9 @@ def handle_menu_callback(callback_id, chat_id, user, data):
         take_number(chat_id, user)
     elif action == "admin":
         if user["is_admin"]:
-            send_message(chat_id, "Админ-панель", admin_keyboard())
+            send_message(chat_id, "🛠️ Админ-панель", admin_keyboard())
         else:
-            send_message(chat_id, "Нет доступа.", main_menu_keyboard(user))
+            send_message(chat_id, "⛔ Нет доступа.", main_menu_keyboard(user))
     answer_callback(callback_id)
 
 
@@ -750,26 +859,105 @@ def show_profile(chat_id, user):
         taken = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_taken'", (user["id"],)).fetchone()["count"]
         done = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_done'", (user["id"],)).fetchone()["count"]
         failed = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_failed'", (user["id"],)).fetchone()["count"]
+        balance, supplier_done = supplier_balance(conn, user["id"])
     lines = [
         "👤 Профиль",
-        f"Username: {user_handle(user)}",
-        f"Роль: {role_title(user['role'])}",
+        f"👤 Username: {user_handle(user)}",
+        f"🎚️ Роль: {role_title(user['role'])}",
     ]
+    rows = []
     if user["role"] == ROLE_SUPPLIER:
-        lines.append(f"Добавлено номеров: {added}")
+        lines.extend([
+            f"📱 Добавлено номеров: {added}",
+            f"✅ Встало номеров: {supplier_done}",
+            f"💰 Баланс: {money_text(balance)}",
+        ])
+        rows.append([("💸 Вывод", "menu:withdraw")])
     if user["role"] == ROLE_OPERATOR:
         lines.extend([
-            f"Взято номеров: {taken}",
-            f"Встали: {done}",
-            f"Не встали: {failed}",
+            f"📲 Взято номеров: {taken}",
+            f"✅ Встали: {done}",
+            f"❌ Не встали: {failed}",
         ])
+    rows.append(back_row())
     text = "\n".join(lines)
-    send_message(chat_id, text, inline_keyboard([back_row()]))
+    send_message(chat_id, text, inline_keyboard(rows))
+
+
+def withdraw_start(chat_id, user):
+    if user["role"] != ROLE_SUPPLIER:
+        send_message(chat_id, "⛔ Вывод доступен только поставщикам.", main_menu_keyboard(user))
+        return
+    with closing(db()) as conn:
+        balance, _ = supplier_balance(conn, user["id"])
+    if balance <= 0:
+        send_message(chat_id, "💰 Баланс пока 0$. Вывод станет доступен после вставших номеров.", inline_keyboard([back_row()]))
+        return
+    set_state(user["id"], "withdraw_amount")
+    send_message(chat_id, f"💸 Введите сумму вывода. Доступно: {money_text(balance)}.")
+
+
+def number_button_rows(rows, prefix):
+    keyboard_rows = []
+    for row in rows:
+        keyboard_rows.append([(f"📱 {row['masked_number']}", f"{prefix}:{row['id']}")])
+    keyboard_rows.append(back_row())
+    return keyboard_rows
+
+
+def show_global_queue(chat_id):
+    with closing(db()) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) count FROM numbers WHERE status = ? AND remaining > 0",
+            (STATUS_AVAILABLE,),
+        ).fetchone()["count"]
+        rows = conn.execute(
+            """
+            SELECT id, masked_number
+            FROM numbers
+            WHERE status = ? AND remaining > 0
+            ORDER BY created_at ASC
+            LIMIT 50
+            """,
+            (STATUS_AVAILABLE,),
+        ).fetchall()
+    if not rows:
+        send_message(chat_id, "🌐 Общая очередь пуста. 📭", inline_keyboard([back_row()]))
+        return
+    send_message(
+        chat_id,
+        f"🌐 Общая очередь в боте\n📦 Всего номеров в очереди: {total}\n👇 Нажмите номер, чтобы убрать его из очереди.",
+        inline_keyboard(number_button_rows(rows, "queue:clear")),
+    )
+
+
+def show_withdrawals(chat_id):
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT w.id, w.amount, u.username, u.public_id
+            FROM withdrawals w
+            JOIN users u ON u.id = w.user_id
+            WHERE w.status = ?
+            ORDER BY w.created_at ASC
+            LIMIT 50
+            """,
+            (WITHDRAWAL_PENDING,),
+        ).fetchall()
+    if not rows:
+        send_message(chat_id, "💸 Ожидающих выводов нет. ✅", admin_keyboard())
+        return
+    buttons = []
+    for row in rows:
+        handle = f"@{row['username']}" if row["username"] else row["public_id"]
+        buttons.append([(f"💸 {handle} — {money_text(row['amount'])}", f"withdrawal:select:{row['id']}")])
+    buttons.append(back_row())
+    send_message(chat_id, "💸 Выводы на обработке:\n👇 Выберите заявку.", inline_keyboard(buttons))
 
 
 def add_number_start(chat_id, user):
     if user["role"] != ROLE_SUPPLIER:
-        send_message(chat_id, "Добавлять номера может только поставщик.", main_menu_keyboard(user))
+        send_message(chat_id, "⛔ Добавлять номера может только поставщик.", main_menu_keyboard(user))
         return
     set_state(user["id"], "add_number")
     send_message(chat_id, "➕ Отправьте российские номера списком, каждый с новой строки.\nПример:\n+79991234567\n89997654321")
@@ -777,7 +965,7 @@ def add_number_start(chat_id, user):
 
 def show_my_numbers(chat_id, user):
     if user["role"] != ROLE_SUPPLIER:
-        send_message(chat_id, "Раздел доступен поставщикам.", main_menu_keyboard(user))
+        send_message(chat_id, "⛔ Раздел доступен поставщикам.", main_menu_keyboard(user))
         return
     with closing(db()) as conn:
         rows = conn.execute(
@@ -785,13 +973,13 @@ def show_my_numbers(chat_id, user):
             (user["id"],),
         ).fetchall()
     if not rows:
-        send_message(chat_id, "Пока номеров нет.", inline_keyboard([back_row()]))
+        send_message(chat_id, "📭 Пока номеров нет.", inline_keyboard([back_row()]))
         return
     send_message(chat_id, "📱 Последние ваши номера:", inline_keyboard([back_row()]))
     for row in rows:
         send_message(
             chat_id,
-            f"#{row['id']} {row['masked_number']}\nСтатус: {row['status']}\nОсталось: {row['remaining']} из {row['volume']}\nПричина: {row['last_reason'] or '-'}",
+            f"#{row['id']} {row['masked_number']}\n📌 Статус: {row['status']}\n📦 Осталось: {row['remaining']} из {row['volume']}\n📝 Причина: {row['last_reason'] or '-'}",
             supplier_number_keyboard(row["id"]),
         )
 
@@ -799,37 +987,40 @@ def show_my_numbers(chat_id, user):
 def show_my_queue(chat_id, user):
     if user["role"] == ROLE_SUPPLIER:
         with closing(db()) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) count FROM numbers WHERE supplier_user_id = ? AND status = ? AND remaining > 0",
+                (user["id"], STATUS_AVAILABLE),
+            ).fetchone()["count"]
             rows = conn.execute(
                 """
-                SELECT n.*, op.username operator_username
-                FROM numbers n
-                LEFT JOIN users op ON op.id = n.assigned_operator_user_id
-                WHERE n.supplier_user_id = ? AND n.status IN (?, ?)
-                ORDER BY n.created_at ASC
-                LIMIT 15
+                SELECT id, masked_number
+                FROM numbers
+                WHERE supplier_user_id = ? AND status = ? AND remaining > 0
+                ORDER BY created_at ASC
+                LIMIT 50
                 """,
-                (user["id"], STATUS_AVAILABLE, STATUS_ASSIGNED),
+                (user["id"], STATUS_AVAILABLE),
             ).fetchall()
         if not rows:
-            send_message(chat_id, "В вашей очереди нет активных номеров.", inline_keyboard([back_row()]))
+            send_message(chat_id, "📦 В вашей очереди нет доступных номеров. 📭", inline_keyboard([back_row()]))
             return
-        text = ["📦 Моя очередь:"]
-        for row in rows:
-            operator = f"@{row['operator_username']}" if row["operator_username"] else "-"
-            text.append(f"#{row['id']} {row['masked_number']} | {row['status']} | взял {operator}")
-        send_message(chat_id, "\n".join(text), inline_keyboard([back_row()]))
+        send_message(
+            chat_id,
+            f"📦 Моя очередь\n🔢 Всего номеров в очереди: {total}\n👇 Нажмите номер, чтобы убрать его из очереди.",
+            inline_keyboard(number_button_rows(rows, "queue:clear")),
+        )
         return
 
     if user["role"] == ROLE_OPERATOR:
         show_active_number(chat_id, user)
         return
 
-    send_message(chat_id, "Очередь доступна поставщикам и операторам.", main_menu_keyboard(user))
+    send_message(chat_id, "📦 Очередь доступна поставщикам и операторам.", main_menu_keyboard(user))
 
 
 def take_number(chat_id, user):
     if user["role"] != ROLE_OPERATOR:
-        send_message(chat_id, "Брать номера может только оператор.", main_menu_keyboard(user))
+        send_message(chat_id, "⛔ Брать номера может только оператор.", main_menu_keyboard(user))
         return
     with closing(db()) as conn:
         active = conn.execute(
@@ -841,7 +1032,7 @@ def take_number(chat_id, user):
             (user["id"], STATUS_ASSIGNED),
         ).fetchone()
         if active:
-            send_message(chat_id, "У вас уже есть активная заявка.", operator_active_keyboard(active["id"]))
+            send_message(chat_id, "📦 У вас уже есть активная заявка.", operator_active_keyboard(active["id"]))
             return
         row = conn.execute(
             """
@@ -852,7 +1043,7 @@ def take_number(chat_id, user):
             (STATUS_AVAILABLE,),
         ).fetchone()
         if not row:
-            send_message(chat_id, "Сейчас свободных номеров нет.", main_menu_keyboard(user))
+            send_message(chat_id, "📭 Сейчас свободных номеров нет.", main_menu_keyboard(user))
             return
         conn.execute(
             "UPDATE numbers SET status = ?, assigned_operator_user_id = ?, assigned_at = ? WHERE id = ?",
@@ -862,12 +1053,12 @@ def take_number(chat_id, user):
         conn.commit()
 
     log_event(user["id"], "number_taken", row["id"])
-    send_message(chat_id, f"📲 Заявка #{row['id']} взята.\nНомер: {row['masked_number']}\nОжидайте сообщение от поставщика.", operator_active_keyboard(row["id"]))
+    send_message(chat_id, f"📲 Заявка #{row['id']} взята.\n📱 Номер: {row['masked_number']}\n⏳ Ожидайте сообщение от поставщика.", operator_active_keyboard(row["id"]))
     if supplier:
         set_state(supplier["id"], "supplier_message", {"number_id": row["id"]})
         send_message(
             supplier["telegram_id"],
-            f"📩 Ваш номер #{row['id']} взяли.\nВведите сообщение для оператора. Не отправляйте одноразовые коды через бота.",
+            f"📩 Ваш номер #{row['id']} взяли.\n✍️ Введите сообщение для оператора. Не отправляйте одноразовые коды через бота.",
             supplier_number_keyboard(row["id"]),
         )
 
@@ -883,41 +1074,41 @@ def show_active_number(chat_id, user):
             (user["id"], STATUS_ASSIGNED),
         ).fetchone()
     if not row:
-        send_message(chat_id, "Активной заявки нет.", main_menu_keyboard(user))
+        send_message(chat_id, "📭 Активной заявки нет.", main_menu_keyboard(user))
         return
-    send_message(chat_id, f"📦 Активная заявка #{row['id']}\nНомер: {row['masked_number']}\nСтатус: {row['status']}", operator_active_keyboard(row["id"]))
+    send_message(chat_id, f"📦 Активная заявка #{row['id']}\n📱 Номер: {row['masked_number']}\n📌 Статус: {row['status']}", operator_active_keyboard(row["id"]))
 
 
 def handle_supplier_callback(callback_id, chat_id, user, data):
     if user["role"] != ROLE_SUPPLIER:
-        answer_callback(callback_id, "Нет доступа.", True)
+        answer_callback(callback_id, "⛔ Нет доступа.", True)
         return
     _, action, raw_id = data.split(":")
     number_id = int(raw_id)
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
         if not row or row["supplier_user_id"] != user["id"]:
-            answer_callback(callback_id, "Нет доступа к заявке.", True)
+            answer_callback(callback_id, "⛔ Нет доступа к заявке.", True)
             return
         if action == "repeat":
             set_state(user["id"], "supplier_repeat_reason", {"number_id": number_id})
             send_message(chat_id, "🔁 Укажите причину повтора.")
         elif action == "cancel":
             set_state(user["id"], "cancel_reason", {"number_id": number_id})
-            send_message(chat_id, "Укажите причину отмены.")
+            send_message(chat_id, "❌ Укажите причину отмены.")
     answer_callback(callback_id)
 
 
 def handle_operator_callback(callback_id, chat_id, user, data):
     if user["role"] != ROLE_OPERATOR:
-        answer_callback(callback_id, "Нет доступа.", True)
+        answer_callback(callback_id, "⛔ Нет доступа.", True)
         return
     _, action, raw_id = data.split(":")
     number_id = int(raw_id)
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
         if not row or row["assigned_operator_user_id"] != user["id"]:
-            answer_callback(callback_id, "Нет доступа к заявке.", True)
+            answer_callback(callback_id, "⛔ Нет доступа к заявке.", True)
             return
         supplier = conn.execute("SELECT id, telegram_id FROM users WHERE id = ?", (row["supplier_user_id"],)).fetchone()
         if action == "done":
@@ -942,7 +1133,7 @@ def handle_operator_callback(callback_id, chat_id, user, data):
                 set_state(supplier["id"], "supplier_message", {"number_id": number_id})
                 send_message(
                     supplier["telegram_id"],
-                    f"🔁 Оператор запросил повтор сообщения по заявке #{number_id}.\nВведите новое сообщение. Не отправляйте одноразовые коды через бота.",
+                    f"🔁 Оператор запросил повтор сообщения по заявке #{number_id}.\n✍️ Введите новое сообщение. Не отправляйте одноразовые коды через бота.",
                     supplier_number_keyboard(number_id),
                 )
         elif action == "repeat":
@@ -958,13 +1149,65 @@ def handle_operator_callback(callback_id, chat_id, user, data):
             send_message(chat_id, f"⏭️ Заявка #{number_id} возвращена в очередь.", main_menu_keyboard(user))
         elif action == "failed":
             set_state(user["id"], "fail_reason", {"number_id": number_id})
-            send_message(chat_id, "Укажите причину, почему не встал.")
+            send_message(chat_id, "❌ Укажите причину, почему не встал.")
+    answer_callback(callback_id)
+
+
+def handle_queue_callback(callback_id, chat_id, user, data):
+    parts = data.split(":")
+    if len(parts) != 3 or parts[1] != "clear":
+        answer_callback(callback_id)
+        return
+    number_id = int(parts[2])
+    with closing(db()) as conn:
+        row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
+        if not row or row["status"] != STATUS_AVAILABLE:
+            answer_callback(callback_id, "⚠️ Номер уже не в очереди.", True)
+            return
+        if not user["is_admin"] and row["supplier_user_id"] != user["id"]:
+            answer_callback(callback_id, "⛔ Нет доступа к номеру.", True)
+            return
+        conn.execute(
+            "UPDATE numbers SET status = ?, remaining = 0, completed_at = ?, last_reason = ? WHERE id = ?",
+            (STATUS_CANCELLED, now_iso(), "Убран из очереди", number_id),
+        )
+        conn.commit()
+    log_event(user["id"], "queue_number_removed", number_id, "removed_from_queue")
+    answer_callback(callback_id, "✅ Номер убран из очереди.")
+    send_message(chat_id, f"🧹 Номер {row['masked_number']} убран из очереди.", main_menu_keyboard(user) if not user["is_admin"] else admin_keyboard())
+
+
+def handle_withdrawal_callback(callback_id, chat_id, user, data):
+    if not user["is_admin"]:
+        answer_callback(callback_id, "⛔ Нет доступа.", True)
+        return
+    parts = data.split(":")
+    if len(parts) != 3 or parts[1] != "select":
+        answer_callback(callback_id)
+        return
+    withdrawal_id = int(parts[2])
+    with closing(db()) as conn:
+        row = conn.execute(
+            """
+            SELECT w.*, u.username, u.public_id
+            FROM withdrawals w
+            JOIN users u ON u.id = w.user_id
+            WHERE w.id = ? AND w.status = ?
+            """,
+            (withdrawal_id, WITHDRAWAL_PENDING),
+        ).fetchone()
+    if not row:
+        answer_callback(callback_id, "⚠️ Заявка уже обработана.", True)
+        return
+    set_state(user["id"], "admin_withdrawal_message", {"withdrawal_id": withdrawal_id})
+    handle = f"@{row['username']}" if row["username"] else row["public_id"]
+    send_message(chat_id, f"💸 Вывод {money_text(row['amount'])} для {handle}.\n✍️ Введите сообщение, которое отправить пользователю.")
     answer_callback(callback_id)
 
 
 def handle_admin_callback(callback_id, chat_id, user, data):
     if not user["is_admin"]:
-        answer_callback(callback_id, "Нет доступа.", True)
+        answer_callback(callback_id, "⛔ Нет доступа.", True)
         return
     action = data.split(":")[1]
     if action == "stats":
@@ -973,6 +1216,10 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         send_message(chat_id, build_operator_stats(), admin_keyboard())
     elif action == "auto_report":
         send_message(chat_id, build_auto_report(), admin_keyboard())
+    elif action == "withdrawals":
+        show_withdrawals(chat_id)
+    elif action == "global_queue":
+        show_global_queue(chat_id)
     elif action == "grant_operator":
         set_state(user["id"], "grant_operator")
         send_message(chat_id, "🎧 Введите @username пользователя, которому выдать роль оператора.")
@@ -994,7 +1241,7 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         send_message(chat_id, "📣 Введите текст рассылки.")
     elif action == "block":
         set_state(user["id"], "block_user")
-        send_message(chat_id, "Введите @username пользователя для блокировки.")
+        send_message(chat_id, "🚫 Введите @username пользователя для блокировки.")
     elif action == "unblock":
         set_state(user["id"], "unblock_user")
         send_message(chat_id, "✅ Введите @username пользователя для разблокировки.")
