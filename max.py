@@ -164,6 +164,7 @@ def send_message(chat_id, text, reply_markup=None):
     return api("sendMessage", data)
 
 
+
 def copy_message(chat_id, from_chat_id, message_id, caption=None, reply_markup=None):
     data = {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
     if caption:
@@ -172,12 +173,12 @@ def copy_message(chat_id, from_chat_id, message_id, caption=None, reply_markup=N
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     return api("copyMessage", data)
 
-
 def answer_callback(callback_id, text=None, alert=False):
     data = {"callback_query_id": callback_id, "show_alert": "true" if alert else "false"}
     if text:
         data["text"] = text
     return api("answerCallbackQuery", data)
+
 
 
 def delete_message(chat_id, message_id):
@@ -222,7 +223,6 @@ def send_document_bytes(chat_id, filename, content, caption=None, reply_markup=N
     if not result.get("ok"):
         raise RuntimeError(result)
     return result["result"]
-
 
 def role_title(role):
     return {ROLE_OPERATOR: "оператор", ROLE_SUPPLIER: "поставщик"}.get(role, role)
@@ -278,12 +278,10 @@ def back_row():
 def main_menu_keyboard(user):
     rows = []
     if user["role"] == ROLE_SUPPLIER:
-        rows.append([("➕ Добавить номер", "menu:add_number")])
-        rows.append([("📦 Моя очередь", "menu:my_queue")])
+        rows.append([("➕ Добавить номер", "menu:add_number"), ("📦 Моя очередь", "menu:my_queue")])
         rows.append([("💎 Кошелек", "menu:wallet")])
     elif user["role"] == ROLE_OPERATOR:
         rows.append([("📲 Взять номер", "menu:take_number")])
-    rows.append([("👤 Профиль", "menu:profile")])
     if user["is_admin"]:
         rows.append([("🛠️ Админ-панель", "menu:admin")])
     return inline_keyboard(rows)
@@ -321,6 +319,7 @@ def operator_active_keyboard(number_id):
     ])
 
 
+
 def money_text(value):
     value = round(float(value), 2)
     if value.is_integer():
@@ -347,7 +346,6 @@ def parse_amount(text):
     amount = float(normalized)
     return amount if amount > 0 else None
 
-
 def get_setting(key, default=None):
     with closing(db()) as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -361,6 +359,7 @@ def set_setting(key, value):
             (key, str(value)),
         )
         conn.commit()
+
 
 
 def get_access_password():
@@ -473,8 +472,19 @@ def log_event(actor_user_id, event_type, number_id=None, details=None):
 
 
 def show_home(chat_id, user):
-    text = f"✨ Главное меню\n👤 {user_handle(user)}\n🎚️ Роль: {role_title(user['role'])}"
-    send_message(chat_id, text, main_menu_keyboard(user))
+    lines = [
+        "✨ Главное меню",
+        f"👤 {user_handle(user)}",
+        f"🎚️ Роль: {role_title(user['role'])}",
+    ]
+    if user["role"] == ROLE_SUPPLIER:
+        with closing(db()) as conn:
+            added = conn.execute(
+                "SELECT COUNT(*) count FROM numbers WHERE supplier_user_id = ?",
+                (user["id"],),
+            ).fetchone()["count"]
+        lines.append(f"📱 Добавлено номеров: {added}")
+    send_message(chat_id, "\n".join(lines), main_menu_keyboard(user))
 
 
 def build_global_stats():
@@ -543,6 +553,7 @@ def build_recent_numbers():
 
 def build_auto_report():
     return build_recent_numbers()
+
 
 
 def parse_iso_datetime(value):
@@ -674,7 +685,6 @@ def send_report_file(chat_id, admin):
     send_document_bytes(chat_id, filename, content, "📄 Отчет готов", admin_keyboard())
     clear_state(admin["id"])
 
-
 def build_operator_stats():
     with closing(db()) as conn:
         rows = conn.execute(
@@ -721,6 +731,7 @@ def handle_start(chat_id, telegram_id, username=None):
         return
     set_state(user["id"], "login_password")
     send_message(chat_id, "🔐 Введите пароль доступа.")
+
 
 
 def handle_admin_withdrawal_receipt(chat_id, admin, message):
@@ -787,7 +798,6 @@ def handle_non_text_message(message):
     elif user["state"] == "admin_direct_message":
         handle_admin_direct_receipt(chat_id, user, message)
 
-
 def handle_text(message):
     chat_id = message["chat"]["id"]
     tg_from = message["from"]
@@ -828,9 +838,16 @@ def handle_text(message):
         return
 
     if user["state"] == "add_number":
+        data = state_data(user)
+        delete_message(chat_id, data.get("prompt_message_id"))
         numbers, bad = parse_russian_numbers(text)
         if not numbers:
-            send_message(chat_id, "Отправьте российские номера, каждый с новой строки. Формат: +79991234567 или 89991234567.")
+            prompt = send_message(
+                chat_id,
+                "➕ Отправьте российские номера списком, каждый с новой строки.\nПример:\n+79991234567\n89997654321",
+                inline_keyboard([back_row()]),
+            )
+            set_state(user["id"], "add_number", {"prompt_message_id": prompt.get("message_id")})
             return
         with closing(db()) as conn:
             for number in numbers:
@@ -847,6 +864,7 @@ def handle_text(message):
         extra = f"\nНе добавлены: {', '.join(bad)}" if bad else ""
         send_message(chat_id, f"✅ Добавлено номеров: {len(numbers)}.{extra}", main_menu_keyboard(user))
         return
+
 
     if user["state"] == "supplier_message":
         save_supplier_message(chat_id, user, text)
@@ -888,6 +906,7 @@ def handle_text(message):
         return
 
     send_message(chat_id, "👇 Используйте inline-кнопки ниже.", main_menu_keyboard(user))
+
 
 
 def handle_withdraw_amount(chat_id, user, text):
@@ -944,7 +963,6 @@ def handle_admin_withdrawal_message(chat_id, admin, text):
     log_event(admin["id"], "withdrawal_completed", details=f"withdrawal_id={withdrawal_id}")
     send_message(row["telegram_id"], f"💸 Ответ по выводу {money_text(row['amount'])}:\n{text}")
     send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(row)}. Заявка убрана из выводов.", admin_keyboard())
-
 
 def save_reason(chat_id, user, text):
     data = state_data(user)
@@ -1172,7 +1190,7 @@ def show_wallet(chat_id, user):
         f"✅ Встало номеров: {supplier_done}",
         f"💰 Мой баланс: {money_text(balance)}",
     ]
-    send_message(chat_id, "\n".join(lines), inline_keyboard([[("💸 Вывод", "menu:withdraw")], back_row()]))
+    send_message(chat_id, "\n".join(lines), inline_keyboard([[('💸 Вывод', 'menu:withdraw')], back_row()]))
 
 
 def withdraw_start(chat_id, user):
@@ -1287,6 +1305,7 @@ def handle_admin_direct_message(chat_id, admin, text):
     send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(target)}.", admin_keyboard())
 
 
+
 def handle_admin_change_password(chat_id, admin, text):
     if not admin["is_admin"]:
         clear_state(admin["id"])
@@ -1301,7 +1320,6 @@ def handle_admin_change_password(chat_id, admin, text):
     log_event(admin["id"], "admin_change_password", details="changed")
     send_message(chat_id, "🔐 Пароль доступа к боту изменен.", admin_keyboard())
 
-
 def clear_database():
     with closing(db()) as conn:
         for table in ("numbers", "logs", "withdrawals", "users", "settings"):
@@ -1311,13 +1329,16 @@ def clear_database():
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.commit()
 
-
 def add_number_start(chat_id, user):
     if user["role"] != ROLE_SUPPLIER:
         send_message(chat_id, "Добавлять номера может только поставщик.", main_menu_keyboard(user))
         return
-    set_state(user["id"], "add_number")
-    send_message(chat_id, "➕ Отправьте российские номера списком, каждый с новой строки.\nПример:\n+79991234567\n89997654321")
+    prompt = send_message(
+        chat_id,
+        "➕ Отправьте российские номера списком, каждый с новой строки.\nПример:\n+79991234567\n89997654321",
+        inline_keyboard([back_row()]),
+    )
+    set_state(user["id"], "add_number", {"prompt_message_id": prompt.get("message_id")})
 
 
 def show_my_numbers(chat_id, user):
@@ -1510,6 +1531,7 @@ def handle_operator_callback(callback_id, chat_id, user, data):
     answer_callback(callback_id)
 
 
+
 def handle_queue_callback(callback_id, chat_id, user, data):
     parts = data.split(":")
     if len(parts) != 3 or parts[1] != "clear":
@@ -1625,7 +1647,6 @@ def handle_db_callback(callback_id, chat_id, user, data):
         answer_callback(callback_id)
         return
     answer_callback(callback_id)
-
 
 def handle_admin_callback(callback_id, chat_id, user, data):
     if not user["is_admin"]:
