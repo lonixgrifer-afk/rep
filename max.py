@@ -16,7 +16,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8722322401]
+ADMIN_TELEGRAM_IDS = [8949311928]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -104,6 +104,7 @@ def init_db():
         )
         migrate_schema(conn)
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '1')")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.commit()
 
 
@@ -279,6 +280,7 @@ def main_menu_keyboard(user):
     if user["role"] == ROLE_SUPPLIER:
         rows.append([("➕ Добавить номер", "menu:add_number")])
         rows.append([("📦 Моя очередь", "menu:my_queue")])
+        rows.append([("💎 Кошелек", "menu:wallet")])
     elif user["role"] == ROLE_OPERATOR:
         rows.append([("📲 Взять номер", "menu:take_number")])
     rows.append([("👤 Профиль", "menu:profile")])
@@ -293,6 +295,7 @@ def admin_keyboard():
         [("📄 Отчет файлом", "admin:report_file"), ("💸 Выводы", "admin:withdrawals")],
         [("🌐 Общая очередь", "admin:global_queue")],
         [("✉️ Написать пользователю", "admin:direct_message")],
+        [("🔐 Сменить пароль", "admin:change_password")],
         [("🎧 Выдача оператора", "admin:grant_operator")],
         [("♻️ Сброс очереди", "admin:reset_queue"), ("📣 Рассылка", "admin:broadcast")],
         [("🚫 Блокировка", "admin:block"), ("✅ Разблокировка", "admin:unblock")],
@@ -358,6 +361,14 @@ def set_setting(key, value):
             (key, str(value)),
         )
         conn.commit()
+
+
+def get_access_password():
+    return get_setting("access_password", ADMIN_PASSWORD)
+
+
+def set_access_password(password):
+    set_setting("access_password", password)
 
 
 def get_user(telegram_id):
@@ -804,7 +815,7 @@ def handle_text(message):
         return
 
     if user["state"] == "login_password":
-        if text != ADMIN_PASSWORD:
+        if text != get_access_password():
             send_message(chat_id, "❌ Пароль неверный.")
             return
         mark_password_ok(user["id"])
@@ -862,6 +873,10 @@ def handle_text(message):
 
     if user["state"] == "admin_direct_message":
         handle_admin_direct_message(chat_id, user, text)
+        return
+
+    if user["state"] == "admin_change_password":
+        handle_admin_change_password(chat_id, user, text)
         return
 
     if user["state"] in {"grant_operator", "block_user", "unblock_user"}:
@@ -1103,6 +1118,8 @@ def handle_menu_callback(callback_id, chat_id, user, data):
         show_home(chat_id, user)
     elif action == "profile":
         show_profile(chat_id, user)
+    elif action == "wallet":
+        show_wallet(chat_id, user)
     elif action == "withdraw":
         withdraw_start(chat_id, user)
     elif action == "add_number":
@@ -1127,29 +1144,35 @@ def show_profile(chat_id, user):
         taken = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_taken'", (user["id"],)).fetchone()["count"]
         done = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_done'", (user["id"],)).fetchone()["count"]
         failed = conn.execute("SELECT COUNT(*) count FROM logs WHERE actor_user_id = ? AND event_type = 'number_failed'", (user["id"],)).fetchone()["count"]
-        balance, supplier_done = supplier_balance(conn, user["id"])
     lines = [
         "👤 Профиль",
         f"👤 Username: {user_handle(user)}",
         f"🎚️ Роль: {role_title(user['role'])}",
     ]
-    rows = []
     if user["role"] == ROLE_SUPPLIER:
-        lines.extend([
-            f"📱 Добавлено номеров: {added}",
-            f"✅ Встало номеров: {supplier_done}",
-            f"💰 Баланс: {money_text(balance)}",
-        ])
-        rows.append([("💸 Вывод", "menu:withdraw")])
+        lines.append(f"📱 Добавлено номеров: {added}")
     if user["role"] == ROLE_OPERATOR:
         lines.extend([
             f"📲 Взято номеров: {taken}",
             f"✅ Встали: {done}",
             f"❌ Не встали: {failed}",
         ])
-    rows.append(back_row())
     text = "\n".join(lines)
-    send_message(chat_id, text, inline_keyboard(rows))
+    send_message(chat_id, text, inline_keyboard([back_row()]))
+
+
+def show_wallet(chat_id, user):
+    if user["role"] != ROLE_SUPPLIER:
+        send_message(chat_id, "⛔ Кошелек доступен только поставщикам.", main_menu_keyboard(user))
+        return
+    with closing(db()) as conn:
+        balance, supplier_done = supplier_balance(conn, user["id"])
+    lines = [
+        "💎 Кошелек",
+        f"✅ Встало номеров: {supplier_done}",
+        f"💰 Мой баланс: {money_text(balance)}",
+    ]
+    send_message(chat_id, "\n".join(lines), inline_keyboard([[("💸 Вывод", "menu:withdraw")], back_row()]))
 
 
 def withdraw_start(chat_id, user):
@@ -1264,12 +1287,28 @@ def handle_admin_direct_message(chat_id, admin, text):
     send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(target)}.", admin_keyboard())
 
 
+def handle_admin_change_password(chat_id, admin, text):
+    if not admin["is_admin"]:
+        clear_state(admin["id"])
+        send_message(chat_id, "⛔ Нет доступа.")
+        return
+    new_password = (text or "").strip()
+    if len(new_password) < 4:
+        send_message(chat_id, "⚠️ Пароль должен быть минимум 4 символа. Введите другой пароль.")
+        return
+    set_access_password(new_password)
+    clear_state(admin["id"])
+    log_event(admin["id"], "admin_change_password", details="changed")
+    send_message(chat_id, "🔐 Пароль доступа к боту изменен.", admin_keyboard())
+
+
 def clear_database():
     with closing(db()) as conn:
         for table in ("numbers", "logs", "withdrawals", "users", "settings"):
             conn.execute(f"DELETE FROM {table}")
         conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('numbers', 'logs', 'withdrawals', 'users')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '1')")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.commit()
 
 
@@ -1607,6 +1646,9 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         show_global_queue(chat_id)
     elif action == "direct_message":
         show_user_picker(chat_id, "usermsg", "✉️ Выберите пользователя, которому написать:")
+    elif action == "change_password":
+        set_state(user["id"], "admin_change_password")
+        send_message(chat_id, "🔐 Введите новый пароль доступа к боту.")
     elif action == "clear_db":
         send_message(
             chat_id,
