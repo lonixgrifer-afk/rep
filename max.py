@@ -13,6 +13,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGH9QWkNshyIlD8giWHhm93xKR26p7sC
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
+def load_json_env(key, default=None):
+    value = os.getenv(key)
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
 
 BUTTON_CUSTOM_EMOJI_IDS = {
     "menu:home": "5244711640343017057",
