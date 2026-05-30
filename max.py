@@ -9,15 +9,19 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 
+# Один файл, без requirements.txt и .env.
+# Заполните перед запуском. Можно также передать через переменные окружения.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGH9QWkNshyIlD8giWHhm93xKR26p7sCiE")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
-BUTTON_CUSTOM_EMOJI_IDS = parse_json_object(
-    os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
-)
+# JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
+# Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
+# Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","⬅️ Назад":"5368324170671202286"}'
+BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
 
-BUTTON_STYLES = load_json_env("BUTTON_STYLES", {})
+# Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
+BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
 ADMIN_TELEGRAM_IDS = [8949311928]
