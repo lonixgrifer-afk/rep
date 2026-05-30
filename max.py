@@ -1427,9 +1427,16 @@ def show_my_queue(chat_id, user):
                 """,
                 (user["id"], STATUS_AVAILABLE),
             ).fetchall()
+        
         if not rows:
-            send_message(chat_id, "📦 В вашей очереди нет доступных номеров. 📭", inline_keyboard([back_row()]))
+            # Текст с двумя пробелами в начале
+            text = "  📦 В вашей очереди нет доступных номеров."
+            # Инструкция для премиум-эмодзи
+            entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5244711640343017057"}]
+            
+            send_message(chat_id, text, inline_keyboard([back_row()]), entities=entities)
             return
+            
         send_message(
             chat_id,
             f"📦 Моя очередь\n🔢 Всего номеров в очереди: {total}\n👇 Нажмите номер, чтобы убрать его из очереди.",
