@@ -494,19 +494,38 @@ def log_event(actor_user_id, event_type, number_id=None, details=None):
 
 
 def show_home(chat_id, user):
+    # 1. Формируем текст
+    # Используем спец-символ (например, пустой квадрат или пробел), 
+    # который заменим на премиум-эмодзи
     lines = [
-        "✨ Главное меню",
-        f"👤 {user_handle(user)}",
-        f"🎚️ Роль: {role_title(user['role'])}",
+        "  Главное меню",         # Смещение 0
+        f"  {user_handle(user)}",  # Смещение будет зависеть от длины строки
+        f"  Роль: {role_title(user['role'])}",
     ]
+    
+    # 2. Вычисляем позиции (offsets)
+    # Важно: offset считается в байтах от начала всей строки
+    # Текст "  " (2 пробела) = 2 байта. 
+    # Каждый символ после первой строки смещается на длину предыдущей строки + символ переноса (\n)
+    
+    entities = [
+        {"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5244711640343017057"},
+        {"type": "custom_emoji", "offset": len(lines[0]) + 1, "length": 2, "custom_emoji_id": "5244711640343017057"},
+        {"type": "custom_emoji", "offset": len(lines[0]) + len(lines[1]) + 2, "length": 2, "custom_emoji_id": "5244711640343017057"},
+    ]
+
     if user["role"] == ROLE_SUPPLIER:
         with closing(db()) as conn:
             added = conn.execute(
                 "SELECT COUNT(*) count FROM numbers WHERE supplier_user_id = ?",
                 (user["id"],),
             ).fetchone()["count"]
-        lines.append(f"📱 Добавлено номеров: {added}")
-    send_message(chat_id, "\n".join(lines), main_menu_keyboard(user))
+        # Добавляем строку с эмодзи
+        lines.append(f"  📱 Добавлено номеров: {added}")
+        entities.append({"type": "custom_emoji", "offset": len("\n".join(lines[:-1])) + 1, "length": 2, "custom_emoji_id": "5244711640343017057"})
+
+    # 3. Отправляем
+    send_message(chat_id, "\n".join(lines), main_menu_keyboard(user), entities=entities)
 
 
 def build_global_stats():
