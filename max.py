@@ -103,7 +103,7 @@ def init_db():
             """
         )
         migrate_schema(conn)
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '1')")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '0')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.commit()
 
@@ -157,10 +157,12 @@ def api(method, data=None):
     return result["result"]
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, entities=None):
     data = {"chat_id": chat_id, "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    if entities:
+        data["entities"] = json.dumps(entities, ensure_ascii=False)
     return api("sendMessage", data)
 
 
@@ -273,6 +275,26 @@ def inline_keyboard(rows):
 
 def back_row():
     return [("⬅️ Назад", "menu:home")]
+
+
+def prompt_keyboard(extra_rows=None):
+    rows = list(extra_rows or [])
+    rows.append(back_row())
+    return inline_keyboard(rows)
+
+
+def send_state_prompt(chat_id, user_id, state, text, data=None, reply_markup=None):
+    message = send_message(chat_id, text, reply_markup or prompt_keyboard())
+    state_payload = dict(data or {})
+    state_payload["prompt_message_id"] = message.get("message_id")
+    set_state(user_id, state, state_payload)
+    return message
+
+
+def delete_state_prompt(chat_id, user):
+    prompt_message_id = state_data(user).get("prompt_message_id")
+    if prompt_message_id:
+        delete_message(chat_id, prompt_message_id)
 
 
 def main_menu_keyboard(user):
@@ -793,6 +815,7 @@ def handle_non_text_message(message):
     user = create_or_touch_user(tg_from["id"], extract_username(tg_from))
     if user["is_blocked"] or not user["password_check"]:
         return
+    delete_state_prompt(chat_id, user)
     if user["state"] == "admin_withdrawal_message":
         handle_admin_withdrawal_receipt(chat_id, user, message)
     elif user["state"] == "admin_direct_message":
@@ -803,7 +826,9 @@ def handle_text(message):
     tg_from = message["from"]
     telegram_id = tg_from["id"]
     username = extract_username(tg_from)
-    text = (message.get("text") or "").strip()
+    raw_text = message.get("text") or ""
+    text = raw_text.strip()
+    entities = message.get("entities") or []
     delete_message(chat_id, message.get("message_id"))
 
     if text == "/start":
@@ -837,9 +862,10 @@ def handle_text(message):
         send_message(chat_id, "🔐 Сначала войдите по паролю через /start.")
         return
 
+    delete_state_prompt(chat_id, user)
+
     if user["state"] == "add_number":
         data = state_data(user)
-        delete_message(chat_id, data.get("prompt_message_id"))
         numbers, bad = parse_russian_numbers(text)
         if not numbers:
             prompt = send_message(
@@ -890,7 +916,7 @@ def handle_text(message):
         return
 
     if user["state"] == "admin_direct_message":
-        handle_admin_direct_message(chat_id, user, text)
+        handle_admin_direct_message(chat_id, user, raw_text, entities)
         return
 
     if user["state"] == "admin_change_password":
@@ -902,7 +928,7 @@ def handle_text(message):
         return
 
     if user["state"] == "broadcast":
-        handle_broadcast_text(chat_id, user, text)
+        handle_broadcast_text(chat_id, user, raw_text, entities)
         return
 
     send_message(chat_id, "👇 Используйте inline-кнопки ниже.", main_menu_keyboard(user))
@@ -916,7 +942,7 @@ def handle_withdraw_amount(chat_id, user, text):
         return
     amount = parse_amount(text)
     if amount is None:
-        send_message(chat_id, "💸 Введите сумму вывода числом, например: 1 или 2.50")
+        send_state_prompt(chat_id, user["id"], "withdraw_amount", "💸 Введите сумму вывода числом, например: 1 или 2.50")
         return
     with closing(db()) as conn:
         balance, _ = supplier_balance(conn, user["id"])
@@ -1016,7 +1042,7 @@ def save_supplier_message(chat_id, user, text):
     number_id = data.get("number_id")
     message = text.strip()
     if not message:
-        send_message(chat_id, "Введите непустое сообщение для оператора.")
+        send_state_prompt(chat_id, user["id"], "supplier_message", "Введите непустое сообщение для оператора.", {"number_id": number_id})
         return
 
     with closing(db()) as conn:
@@ -1070,7 +1096,7 @@ def handle_admin_text_state(chat_id, admin, text):
     send_message(chat_id, action_text, admin_keyboard())
 
 
-def handle_broadcast_text(chat_id, admin, text):
+def handle_broadcast_text(chat_id, admin, text, entities=None):
     if not admin["is_admin"]:
         send_message(chat_id, "⛔ Нет доступа.")
         return
@@ -1079,7 +1105,7 @@ def handle_broadcast_text(chat_id, admin, text):
         rows = conn.execute("SELECT telegram_id FROM users WHERE is_blocked = 0 AND password_check = 1").fetchall()
     for row in rows:
         try:
-            send_message(row["telegram_id"], text)
+            send_message(row["telegram_id"], text, entities=entities)
             sent += 1
         except Exception:
             pass
@@ -1133,7 +1159,8 @@ def handle_callback(callback):
 def handle_menu_callback(callback_id, chat_id, user, data):
     action = data.split(":", 1)[1]
     if action == "home":
-        show_home(chat_id, user)
+        clear_state(user["id"])
+        show_home(chat_id, get_user(user["telegram_id"]) or user)
     elif action == "profile":
         show_profile(chat_id, user)
     elif action == "wallet":
@@ -1202,8 +1229,7 @@ def withdraw_start(chat_id, user):
     if balance <= 0:
         send_message(chat_id, "💰 Баланс пока 0$. Вывод станет доступен после вставших номеров.", inline_keyboard([back_row()]))
         return
-    set_state(user["id"], "withdraw_amount")
-    send_message(chat_id, f"💸 Введите сумму вывода. Доступно: {money_text(balance)}.")
+    send_state_prompt(chat_id, user["id"], "withdraw_amount", f"💸 Введите сумму вывода. Доступно: {money_text(balance)}.")
 
 
 def number_button_rows(rows, prefix):
@@ -1286,7 +1312,7 @@ def show_user_picker(chat_id, callback_prefix, title):
     send_message(chat_id, title, inline_keyboard(buttons))
 
 
-def handle_admin_direct_message(chat_id, admin, text):
+def handle_admin_direct_message(chat_id, admin, text, entities=None):
     if not admin["is_admin"]:
         clear_state(admin["id"])
         send_message(chat_id, "⛔ Нет доступа.")
@@ -1299,7 +1325,13 @@ def handle_admin_direct_message(chat_id, admin, text):
         clear_state(admin["id"])
         send_message(chat_id, "⚠️ Пользователь не найден.", admin_keyboard())
         return
-    send_message(target["telegram_id"], f"✉️ Сообщение от администратора:\n{text}")
+    prefix = "Сообщение от администратора:\n"
+    shifted_entities = []
+    for entity in entities or []:
+        shifted = dict(entity)
+        shifted["offset"] = shifted.get("offset", 0) + len(prefix)
+        shifted_entities.append(shifted)
+    send_message(target["telegram_id"], prefix + text, entities=shifted_entities)
     clear_state(admin["id"])
     log_event(admin["id"], "admin_direct_message", details=f"to={target_user_id}")
     send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(target)}.", admin_keyboard())
@@ -1313,7 +1345,7 @@ def handle_admin_change_password(chat_id, admin, text):
         return
     new_password = (text or "").strip()
     if len(new_password) < 4:
-        send_message(chat_id, "⚠️ Пароль должен быть минимум 4 символа. Введите другой пароль.")
+        send_state_prompt(chat_id, admin["id"], "admin_change_password", "⚠️ Пароль должен быть минимум 4 символа. Введите другой пароль.")
         return
     set_access_password(new_password)
     clear_state(admin["id"])
@@ -1325,7 +1357,7 @@ def clear_database():
         for table in ("numbers", "logs", "withdrawals", "users", "settings"):
             conn.execute(f"DELETE FROM {table}")
         conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('numbers', 'logs', 'withdrawals', 'users')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '1')")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '0')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.commit()
 
@@ -1433,10 +1465,12 @@ def take_number(chat_id, user):
     log_event(user["id"], "number_taken", row["id"])
     send_message(chat_id, f"📲 Номер #{row['id']} взят.\nНомер: {row['masked_number']}\nОжидайте сообщение от поставщика.", operator_active_keyboard(row["id"]))
     if supplier:
-        set_state(supplier["id"], "supplier_message", {"number_id": row["id"]})
-        send_message(
+        send_state_prompt(
             supplier["telegram_id"],
+            supplier["id"],
+            "supplier_message",
             f"📩 Ваш номер #{row['id']} взяли.\nВведите сообщение для оператора.",
+            {"number_id": row["id"]},
             supplier_number_keyboard(row["id"]),
         )
 
@@ -1469,11 +1503,9 @@ def handle_supplier_callback(callback_id, chat_id, user, data):
             answer_callback(callback_id, "Нет доступа к номеру.", True)
             return
         if action == "repeat":
-            set_state(user["id"], "supplier_repeat_reason", {"number_id": number_id})
-            send_message(chat_id, "🔁 Укажите причину повтора.")
+            send_state_prompt(chat_id, user["id"], "supplier_repeat_reason", "🔁 Укажите причину повтора.", {"number_id": number_id})
         elif action == "cancel":
-            set_state(user["id"], "cancel_reason", {"number_id": number_id})
-            send_message(chat_id, "❌ Укажите причину отмены.")
+            send_state_prompt(chat_id, user["id"], "cancel_reason", "❌ Укажите причину отмены.", {"number_id": number_id})
     answer_callback(callback_id)
 
 
@@ -1508,15 +1540,16 @@ def handle_operator_callback(callback_id, chat_id, user, data):
             log_event(user["id"], "repeat_message_requested", number_id)
             send_message(chat_id, f"🔁 По номеру #{number_id} запрошен повтор сообщения.", operator_active_keyboard(number_id))
             if supplier:
-                set_state(supplier["id"], "supplier_message", {"number_id": number_id})
-                send_message(
+                send_state_prompt(
                     supplier["telegram_id"],
+                    supplier["id"],
+                    "supplier_message",
                     f"🔁 Оператор запросил повтор сообщения по номеру #{number_id}.\nВведите новое сообщение.",
+                    {"number_id": number_id},
                     supplier_number_keyboard(number_id),
                 )
         elif action == "repeat":
-            set_state(user["id"], "operator_repeat_reason", {"number_id": number_id})
-            send_message(chat_id, "🔁 Укажите причину повтора: неверный формат, не пришел код или другая причина.")
+            send_state_prompt(chat_id, user["id"], "operator_repeat_reason", "🔁 Укажите причину повтора: неверный формат, не пришел код или другая причина.", {"number_id": number_id})
         elif action == "skip":
             conn.execute(
                 "UPDATE numbers SET status = ?, assigned_operator_user_id = NULL, assigned_at = NULL WHERE id = ?",
@@ -1526,8 +1559,7 @@ def handle_operator_callback(callback_id, chat_id, user, data):
             log_event(user["id"], "number_skipped", number_id)
             send_message(chat_id, f"⏭️ Номер #{number_id} возвращен в очередь.", main_menu_keyboard(user))
         elif action == "failed":
-            set_state(user["id"], "fail_reason", {"number_id": number_id})
-            send_message(chat_id, "❌ Укажите причину, почему не встал.")
+            send_state_prompt(chat_id, user["id"], "fail_reason", "❌ Укажите причину, почему не встал.", {"number_id": number_id})
     answer_callback(callback_id)
 
 
@@ -1578,9 +1610,8 @@ def handle_withdrawal_callback(callback_id, chat_id, user, data):
     if not row:
         answer_callback(callback_id, "Заявка уже обработана.", True)
         return
-    set_state(user["id"], "admin_withdrawal_message", {"withdrawal_id": withdrawal_id})
     handle = f"@{row['username']}" if row["username"] else row["public_id"]
-    send_message(chat_id, f"💸 Вывод {money_text(row['amount'])} для {handle}.\n✍️ Введите сообщение, которое отправить пользователю.")
+    send_state_prompt(chat_id, user["id"], "admin_withdrawal_message", f"💸 Вывод {money_text(row['amount'])} для {handle}.\n✍️ Введите сообщение или чек, который нужно отправить пользователю.", {"withdrawal_id": withdrawal_id})
     answer_callback(callback_id)
 
 
@@ -1628,8 +1659,7 @@ def handle_user_message_callback(callback_id, chat_id, user, data):
     if not target:
         answer_callback(callback_id, "Пользователь не найден.", True)
         return
-    set_state(user["id"], "admin_direct_message", {"target_user_id": target_user_id})
-    send_message(chat_id, f"✉️ Введите сообщение для пользователя {user_handle(target)}.")
+    send_state_prompt(chat_id, user["id"], "admin_direct_message", f"✉️ Введите сообщение для пользователя {user_handle(target)}.", {"target_user_id": target_user_id})
     answer_callback(callback_id)
 
 
@@ -1660,7 +1690,8 @@ def handle_admin_callback(callback_id, chat_id, user, data):
     elif action == "auto_report":
         send_message(chat_id, build_auto_report(), admin_keyboard())
     elif action == "report_file":
-        send_message(chat_id, "📄 Выберите фильтр отчета:", report_filter_keyboard())
+        set_state(user["id"], "admin_report_date", {"report_status": "all", "report_period": "all"})
+        send_report_file(chat_id, get_user(user["telegram_id"]))
     elif action == "withdrawals":
         show_withdrawals(chat_id)
     elif action == "global_queue":
@@ -1668,8 +1699,7 @@ def handle_admin_callback(callback_id, chat_id, user, data):
     elif action == "direct_message":
         show_user_picker(chat_id, "usermsg", "✉️ Выберите пользователя, которому написать:")
     elif action == "change_password":
-        set_state(user["id"], "admin_change_password")
-        send_message(chat_id, "🔐 Введите новый пароль доступа к боту.")
+        send_state_prompt(chat_id, user["id"], "admin_change_password", "🔐 Введите новый пароль доступа к боту.")
     elif action == "clear_db":
         send_message(
             chat_id,
@@ -1677,8 +1707,7 @@ def handle_admin_callback(callback_id, chat_id, user, data):
             inline_keyboard([[("✅ Да, очистить", "db:clear_confirm")], [("❌ Отмена", "db:clear_cancel")]]),
         )
     elif action == "grant_operator":
-        set_state(user["id"], "grant_operator")
-        send_message(chat_id, "🎧 Введите @username пользователя, которому выдать роль оператора.")
+        send_state_prompt(chat_id, user["id"], "grant_operator", "🎧 Введите @username пользователя, которому выдать роль оператора.")
     elif action == "reset_queue":
         with closing(db()) as conn:
             conn.execute(
@@ -1693,32 +1722,17 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         log_event(user["id"], "queue_reset")
         send_message(chat_id, "♻️ Очередь сброшена: активные заявки возвращены в доступные.", admin_keyboard())
     elif action == "broadcast":
-        set_state(user["id"], "broadcast")
-        send_message(chat_id, "📣 Введите текст рассылки.")
+        send_state_prompt(chat_id, user["id"], "broadcast", "📣 Введите текст рассылки. Можно использовать Telegram Premium emoji.")
     elif action == "block":
-        set_state(user["id"], "block_user")
-        send_message(chat_id, "Введите @username пользователя для блокировки.")
+        send_state_prompt(chat_id, user["id"], "block_user", "🚫 Введите @username пользователя для блокировки.")
     elif action == "unblock":
-        set_state(user["id"], "unblock_user")
-        send_message(chat_id, "✅ Введите @username пользователя для разблокировки.")
+        send_state_prompt(chat_id, user["id"], "unblock_user", "✅ Введите @username пользователя для разблокировки.")
     answer_callback(callback_id)
 
 
 def send_auto_reports_if_needed(state):
-    if get_setting("auto_reports_enabled", "1") != "1":
-        return
-    now = time.time()
-    if now - state["last_auto_report_at"] < AUTO_REPORT_INTERVAL_SECONDS:
-        return
-    state["last_auto_report_at"] = now
-    report = "⏱️ Автоотчет\n\n" + build_auto_report()
-    with closing(db()) as conn:
-        admins = conn.execute("SELECT telegram_id FROM users WHERE is_admin = 1 AND is_blocked = 0").fetchall()
-    for admin in admins:
-        try:
-            send_message(admin["telegram_id"], report, admin_keyboard())
-        except Exception:
-            pass
+    # Автоотчеты отключены: отчет отправляется только по кнопке «📄 Отчет файлом».
+    return
 
 
 def poll():
@@ -1737,7 +1751,7 @@ def poll():
                     handle_non_text_message(update["message"])
                 elif "callback_query" in update:
                     handle_callback(update["callback_query"])
-            send_auto_reports_if_needed(runtime_state)
+            # Автоотчеты намеренно не отправляем: отчет доступен только по кнопке «📄 Отчет файлом».
         except KeyboardInterrupt:
             print("Bot stopped.")
             break
