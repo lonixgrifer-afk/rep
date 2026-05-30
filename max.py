@@ -15,8 +15,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGH9QWkNshyIlD8giWHhm93xKR26p7sC
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
+# JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
+# Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
+# Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","⬅️ Назад":"5368324170671202286"}'
+BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{"menu:admin":"5244711640343017057","⬅️ Назад":"5244711640343017057}")
+
+# Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
+BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
+
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8949311928]
+ADMIN_TELEGRAM_IDS = [8722322401]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -270,8 +278,69 @@ def looks_like_code(text):
     return bool(re.fullmatch(r"\d{4,10}", (text or "").strip()))
 
 
+def parse_json_object(value):
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+BUTTON_CUSTOM_EMOJI_IDS = parse_json_object(BUTTON_CUSTOM_EMOJI_IDS_JSON)
+BUTTON_STYLES = parse_json_object(BUTTON_STYLES_JSON)
+
+
+def button_extra_value(mapping, text, callback_data):
+    if callback_data in mapping:
+        return mapping[callback_data]
+    return mapping.get(text)
+
+
+def inline_button(button):
+    if isinstance(button, dict):
+        result = dict(button)
+        if "text" in result:
+            result["text"] = str(result["text"])
+        if "callback_data" in result:
+            result["callback_data"] = str(result["callback_data"])
+        return result
+
+    if len(button) == 2:
+        text, callback_data = button
+        options = {}
+    elif len(button) == 3 and isinstance(button[2], dict):
+        text, callback_data, options = button
+    elif len(button) == 3:
+        text, callback_data, icon_custom_emoji_id = button
+        options = {"icon_custom_emoji_id": icon_custom_emoji_id}
+    elif len(button) == 4:
+        text, callback_data, icon_custom_emoji_id, style = button
+        options = {"icon_custom_emoji_id": icon_custom_emoji_id, "style": style}
+    else:
+        raise ValueError(
+            "Inline button must be a dict or a tuple: "
+            "(text, callback_data[, options/custom_emoji_id[, style]])"
+        )
+
+    text = str(text)
+    callback_data = str(callback_data)
+    result = {"text": text, "callback_data": callback_data}
+
+    icon_custom_emoji_id = options.get("icon_custom_emoji_id") or button_extra_value(
+        BUTTON_CUSTOM_EMOJI_IDS, text, callback_data
+    )
+    if icon_custom_emoji_id:
+        result["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
+
+    style = options.get("style") or button_extra_value(BUTTON_STYLES, text, callback_data)
+    if style:
+        result["style"] = str(style)
+
+    return result
+
+
 def inline_keyboard(rows):
-    return {"inline_keyboard": [[{"text": text, "callback_data": data} for text, data in row] for row in rows]}
+    return {"inline_keyboard": [[inline_button(button) for button in row] for row in rows]}
 
 
 def back_row(target="menu:home"):
@@ -524,6 +593,7 @@ def show_home(chat_id, user):
                 (user["id"],),
             ).fetchone()["count"]
         lines.append(f"📱 Добавлено номеров: {added}")
+        lines.append(f"💵 Прайс за номер: {money_text(get_price_per_number())}")
     send_message(chat_id, "\n".join(lines), main_menu_keyboard(user))
 
 
@@ -1255,7 +1325,6 @@ def show_wallet(chat_id, user):
     lines = [
         "💎 Кошелек",
         f"✅ Встало номеров: {supplier_done}",
-        f"💵 Прайс за номер: {money_text(get_price_per_number())}",
         f"💰 Мой баланс: {money_text(balance)}",
     ]
     send_message(chat_id, "\n".join(lines), inline_keyboard([[('💸 Вывод', 'menu:withdraw')], back_row()]))
