@@ -937,7 +937,10 @@ def handle_text(message):
         handle_broadcast_text(chat_id, user, raw_text, entities)
         return
 
-    send_message(chat_id, "👇 Используйте inline-кнопки ниже.", main_menu_keyboard(user))
+    text = "  👇 Используйте inline-кнопки ниже."
+    entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5244711640343017057"}]
+    
+    send_message(chat_id, text, main_menu_keyboard(user), entities=entities)
 
 
 
