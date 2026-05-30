@@ -14,23 +14,10 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 
-def load_json_env(key: str, default: dict):
-    raw = os.getenv(key)
-    if not raw:
-        return default
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return default
-
-
-BUTTON_CUSTOM_EMOJI_IDS = load_json_env(
-    "BUTTON_CUSTOM_EMOJI_IDS",
-    {
-        "menu:home": "5244711640343017057",
-        "menu:admin": "5368324170671202286",
-    }
-)
+BUTTON_CUSTOM_EMOJI_IDS = {
+    "menu:home": "5244711640343017057",
+    "menu:admin": "5368324170671202286"
+}
 
 BUTTON_STYLES = load_json_env("BUTTON_STYLES", {})
 
