@@ -21,7 +21,7 @@ DB_PATH = os.getenv("DB_PATH", "bot.db")
 BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
 
 # Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
-BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
+BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{"menu:home": "5244711640343017057}","menu:home": "5244711640343017057")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
 ADMIN_TELEGRAM_IDS = [8949311928]
