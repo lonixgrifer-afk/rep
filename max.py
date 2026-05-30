@@ -18,7 +18,10 @@ DB_PATH = os.getenv("DB_PATH", "bot.db")
 # JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
 # Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
 # Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","⬅️ Назад":"5368324170671202286"}'
-BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{"menu:admin":"5244711640343017057","⬅️ Назад":"5244711640343017057}")
+BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv(
+    "BUTTON_CUSTOM_EMOJI_IDS",
+    '{"menu:admin":"5244711640343017057","⬅️ Назад":"5244711640343017057"}'
+)
 
 # Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
