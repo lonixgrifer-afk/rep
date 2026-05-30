@@ -20,7 +20,7 @@ DB_PATH = os.getenv("DB_PATH", "bot.db")
 # Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","⬅️ Назад":"5368324170671202286"}'
 BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv(
     "BUTTON_CUSTOM_EMOJI_IDS",
-    '{"menu:home":"5244711640343017057","Назад":"5244711640343017057"}'
+    '{"menu:home":"5244711640343017057"}'
 )
 
 # Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
