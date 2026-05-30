@@ -289,7 +289,31 @@ def parse_json_object(value):
     return parsed if isinstance(parsed, dict) else {}
 
 
-BUTTON_CUSTOM_EMOJI_IDS = parse_json_object(BUTTON_CUSTOM_EMOJI_IDS_JSON)
+DEFAULT_BUTTON_CUSTOM_EMOJI_IDS = {
+    "menu:add_number": "5427191301667856308",
+    "menu:wallet": "5426879920833863274",
+    "menu:my_queue": "5427286731546205120",
+    "menu:withdraw": "5427268774287943522",
+    "menu:admin": "5427080431382076756",
+    "admin:stats": "5426842013452506664",
+    "admin:operator_stats": "5426842013452506664",
+    "admin:report_file": "5427067988861819649",
+    "admin:withdrawals": "5427268774287943522",
+    "admin:global_queue": "5426906459436780975",
+    "admin:direct_message": "5427304070329177027",
+    "admin:change_password": "5429421102659049990",
+    "admin:change_price": "5426993329445311067",
+    "admin:grant_operator": "5427055821219469820",
+    "admin:reset_queue": "5427221362143960850",
+    "admin:broadcast": "5427181187019874230",
+    "admin:block": "5427193629540128339",
+    "admin:unblock": "5426980427363556942",
+    "admin:clear_db": "5427103057269793539",
+}
+BUTTON_CUSTOM_EMOJI_IDS = {
+    **DEFAULT_BUTTON_CUSTOM_EMOJI_IDS,
+    **parse_json_object(BUTTON_CUSTOM_EMOJI_IDS_JSON),
+}
 BUTTON_STYLES = parse_json_object(BUTTON_STYLES_JSON)
 
 
@@ -586,8 +610,8 @@ def log_event(actor_user_id, event_type, number_id=None, details=None):
 def show_home(chat_id, user):
     lines = [
         "✨ Главное меню",
-        f"👤 {user_handle(user)}",
-        f"🎚️ Роль: {role_title(user['role'])}",
+        "",
+        "Берем Валберис нерек. Валберис нерек.",
     ]
     if user["role"] == ROLE_SUPPLIER:
         with closing(db()) as conn:
