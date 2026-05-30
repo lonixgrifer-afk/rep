@@ -17,14 +17,17 @@ DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 # JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
 # Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
-# Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","⬅️ Назад":"5368324170671202286"}'
-BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{"menu:home": "5244711640343017057","menu:home": "5244711640343017057"}")
+# Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","Назад":"5368324170671202286"}'
+BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
+
+# Премиум-эмодзи для всех кнопок «Назад».
+BACK_BUTTON_CUSTOM_EMOJI_ID = os.getenv("BACK_BUTTON_CUSTOM_EMOJI_ID", "5427242965829457646")
 
 # Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8949311928]
+ADMIN_TELEGRAM_IDS = [8722322401]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -344,7 +347,7 @@ def inline_keyboard(rows):
 
 
 def back_row(target="menu:home"):
-    return [("⬅️ Назад", target)]
+    return [("Назад", target, {"icon_custom_emoji_id": BACK_BUTTON_CUSTOM_EMOJI_ID})]
 
 
 def admin_back_row():
@@ -394,7 +397,7 @@ def admin_keyboard():
         [("♻️ Сброс очереди", "admin:reset_queue"), ("📣 Рассылка", "admin:broadcast")],
         [("🚫 Блокировка", "admin:block"), ("✅ Разблокировка", "admin:unblock")],
         [("🧨 Очистить базу", "admin:clear_db")],
-        [("⬅️ Назад", "menu:home")],
+        back_row(),
     ])
 
 
@@ -402,7 +405,7 @@ def supplier_number_keyboard(number_id):
     return inline_keyboard([
         [("🔁 Повтор с причиной", f"supplier:repeat:{number_id}")],
         [("❌ Отменить с причиной", f"supplier:cancel:{number_id}")],
-        [("⬅️ Назад", "menu:home")],
+        back_row(),
     ])
 
 
@@ -411,7 +414,7 @@ def operator_active_keyboard(number_id):
         [("🔁 Повтор кода", f"operator:repeat_message:{number_id}")],
         [("✅ Встал", f"operator:done:{number_id}"), ("❌ Не встал", f"operator:failed:{number_id}")],
         [("⏭️ Скипнуть", f"operator:skip:{number_id}")],
-        [("⬅️ Назад", "menu:home")],
+        back_row(),
     ])
 
 
