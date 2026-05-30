@@ -14,15 +14,25 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 
-BUTTON_CUSTOM_EMOJI_IDS = json.loads(
-    os.getenv(
-        "BUTTON_CUSTOM_EMOJI_IDS",
-        '{"menu:home":"5244711640343017057","menu:admin":"5368324170671202286"}'
-    )
+def load_json_env(key: str, default: dict):
+    raw = os.getenv(key)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+
+
+BUTTON_CUSTOM_EMOJI_IDS = load_json_env(
+    "BUTTON_CUSTOM_EMOJI_IDS",
+    {
+        "menu:home": "5244711640343017057",
+        "menu:admin": "5368324170671202286",
+    }
 )
 
-# Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
-BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
+BUTTON_STYLES = load_json_env("BUTTON_STYLES", {})
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
 ADMIN_TELEGRAM_IDS = [8949311928]
