@@ -27,7 +27,7 @@ BACK_BUTTON_CUSTOM_EMOJI_ID = os.getenv("BACK_BUTTON_CUSTOM_EMOJI_ID", "54272429
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8949311928]
+ADMIN_TELEGRAM_IDS = [8722322401]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -401,26 +401,26 @@ def delete_state_prompt(chat_id, user):
 def main_menu_keyboard(user):
     rows = []
     if user["role"] == ROLE_SUPPLIER:
-        rows.append([("➕ Добавить номер", "menu:add_number"), ("📦 Моя очередь", "menu:my_queue")])
-        rows.append([("💎 Кошелек", "menu:wallet")])
+        rows.append([("Добавить номер", "menu:add_number"), ("Моя очередь", "menu:my_queue")])
+        rows.append([("Кошелек", "menu:wallet")])
     elif user["role"] == ROLE_OPERATOR:
         rows.append([("📲 Взять номер", "menu:take_number")])
     if user["is_admin"]:
-        rows.append([("🛠️ Админ-панель", "menu:admin")])
+        rows.append([("Админ-панель", "menu:admin")])
     return inline_keyboard(rows)
 
 
 def admin_keyboard():
     return inline_keyboard([
-        [("📊 Статистика", "admin:stats"), ("👥 Операторы", "admin:operator_stats")],
-        [("📄 Отчет файлом", "admin:report_file"), ("💸 Выводы", "admin:withdrawals")],
-        [("🌐 Общая очередь", "admin:global_queue")],
-        [("✉️ Написать пользователю", "admin:direct_message")],
-        [("🔐 Сменить пароль", "admin:change_password"), ("💵 Сменить прайс", "admin:change_price")],
-        [("🎧 Выдача оператора", "admin:grant_operator")],
-        [("♻️ Сброс очереди", "admin:reset_queue"), ("📣 Рассылка", "admin:broadcast")],
-        [("🚫 Блокировка", "admin:block"), ("✅ Разблокировка", "admin:unblock")],
-        [("🧨 Очистить базу", "admin:clear_db")],
+        [("Статистика", "admin:stats"), ("Операторы", "admin:operator_stats")],
+        [("Отчет файлом", "admin:report_file"), ("Выводы", "admin:withdrawals")],
+        [("Общая очередь", "admin:global_queue")],
+        [("Написать пользователю", "admin:direct_message")],
+        [("Сменить пароль", "admin:change_password"), ("Сменить прайс", "admin:change_price")],
+        [("Выдача оператора", "admin:grant_operator")],
+        [("Сброс очереди", "admin:reset_queue"), ("Рассылка", "admin:broadcast")],
+        [("Блокировка", "admin:block"), ("Разблокировка", "admin:unblock")],
+        [("Очистить базу", "admin:clear_db")],
         back_row(),
     ])
 
@@ -608,11 +608,7 @@ def log_event(actor_user_id, event_type, number_id=None, details=None):
 
 
 def show_home(chat_id, user):
-    lines = [
-        "✨ Главное меню",
-        "",
-        "Берем Валберис нерек. Валберис нерек.",
-    ]
+    lines = ["Принимаем wildberries!"]
     if user["role"] == ROLE_SUPPLIER:
         with closing(db()) as conn:
             added = conn.execute(
@@ -621,6 +617,7 @@ def show_home(chat_id, user):
             ).fetchone()["count"]
         lines.append(f"📱 Добавлено номеров: {added}")
         lines.append(f"💵 Прайс за номер: {money_text(get_price_per_number())}")
+    lines.extend(["", "✨ Главное меню:"])
     send_message(chat_id, "\n".join(lines), main_menu_keyboard(user))
 
 
@@ -1354,7 +1351,7 @@ def show_wallet(chat_id, user):
         f"✅ Встало номеров: {supplier_done}",
         f"💰 Мой баланс: {money_text(balance)}",
     ]
-    send_message(chat_id, "\n".join(lines), inline_keyboard([[('💸 Вывод', 'menu:withdraw')], back_row()]))
+    send_message(chat_id, "\n".join(lines), inline_keyboard([[('Вывод', 'menu:withdraw')], back_row()]))
 
 
 def withdraw_start(chat_id, user):
