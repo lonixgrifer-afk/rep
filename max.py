@@ -757,8 +757,15 @@ def handle_start(chat_id, telegram_id, username=None):
         clear_state(user["id"])
         show_home(chat_id, user)
         return
+    
     set_state(user["id"], "login_password")
-    send_message(chat_id, "🔐 Введите пароль доступа.")
+    
+    # Текст с пробелами для эмодзи
+    text = "  🔐 Введите пароль доступа."
+    # Инструкция для телеграма
+    entities = [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "5244711640343017057"}]
+    
+    send_message(chat_id, text, entities=entities)
 
 
 
