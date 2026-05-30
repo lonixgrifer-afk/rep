@@ -14,14 +14,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 
-BUTTON_CUSTOM_EMOJI_IDS = json.loads(
-    os.getenv(
-        "BUTTON_CUSTOM_EMOJI_IDS",
-        '{"menu:admin":"5244711640343017057","menu:home":"5427242965829457646"}'
-    )
-)
-
-BUTTON_CUSTOM_EMOJI_IDS = parse_json_object(BUTTON_CUSTOM_EMOJI_IDS_JSON)
+BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286"}'
 
 # Необязательно: JSON-словарь стилей кнопок Bot API: danger, success или primary.
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
