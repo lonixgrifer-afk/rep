@@ -127,7 +127,6 @@ def init_db():
         )
         migrate_schema(conn)
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '0')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('price_per_number', '1')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('work_enabled', '0')")
         if DROP_GROUP_CHAT_ID:
@@ -550,11 +549,6 @@ def delete_state_prompt(chat_id, user):
 
 def main_menu_keyboard(user):
     rows = []
-    if user["role"] == ROLE_SUPPLIER:
-        rows.append([("Добавить номер", "menu:add_number"), ("Моя очередь", "menu:my_queue")])
-        rows.append([("Кошелек", "menu:wallet")])
-    elif user["role"] == ROLE_OPERATOR:
-        rows.append([("Взять номер", "menu:take_number")])
     if user["is_admin"]:
         rows.append([("Админ-панель", "menu:admin")])
     return inline_keyboard(rows)
@@ -563,10 +557,10 @@ def main_menu_keyboard(user):
 def admin_keyboard():
     return inline_keyboard([
         [("Статистика", "admin:stats"), ("Операторы", "admin:operator_stats")],
-        [("Отчет файлом", "admin:report_file"), ("Выводы", "admin:withdrawals")],
+        [("Отчет файлом", "admin:report_file")],
         [("Общая очередь", "admin:global_queue")],
         [("Написать пользователю", "admin:direct_message")],
-        [("Сменить пароль", "admin:change_password"), ("Сменить прайс", "admin:change_price")],
+        [("Сменить прайс", "admin:change_price")],
         [("Выдача оператора", "admin:grant_operator")],
         [("Сброс очереди", "admin:reset_queue"), ("Рассылка", "admin:broadcast")],
         [("Блокировка", "admin:block"), ("Разблокировка", "admin:unblock")],
@@ -593,7 +587,12 @@ def operator_active_keyboard(number_id):
 
 
 def work_menu_keyboard():
-    return inline_keyboard([[("Взять номер", "work:next:0")]])
+    return inline_keyboard([
+        [("Взять номер", "work:next:0")],
+        [("След номер", "work:next:0")],
+        [("Встал", "work:done:0"), ("Не встал", "work:failed:0")],
+        [("Повторный код", "work:repeat_code:0")],
+    ])
 
 
 def work_number_keyboard(number_id):
@@ -754,8 +753,8 @@ def create_or_touch_user(telegram_id, username=None):
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
         if row:
-            password_check = 1 if row["is_admin"] or telegram_id in ADMIN_TELEGRAM_IDS else row["password_check"]
-            is_admin = 1 if row["is_admin"] or telegram_id in ADMIN_TELEGRAM_IDS else 0
+            password_check = 1
+            is_admin = 1 if telegram_id in ADMIN_TELEGRAM_IDS else 0
             conn.execute(
                 "UPDATE users SET username = COALESCE(?, username), is_admin = ?, password_check = ?, last_seen_at = ? WHERE id = ?",
                 (username, is_admin, password_check, now_iso(), row["id"]),
@@ -769,7 +768,7 @@ def create_or_touch_user(telegram_id, username=None):
             INSERT INTO users (public_id, telegram_id, username, role, is_admin, password_check, created_at, last_seen_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("pending", telegram_id, username, ROLE_SUPPLIER, is_admin, 1 if is_admin else 0, now_iso(), now_iso()),
+            ("pending", telegram_id, username, ROLE_SUPPLIER, is_admin, 1, now_iso(), now_iso()),
         )
         user_id = cur.lastrowid
         conn.execute("UPDATE users SET public_id = ? WHERE id = ?", (public_id(user_id), user_id))
@@ -1080,12 +1079,9 @@ def handle_start(chat_id, telegram_id, username=None):
     if user["is_blocked"]:
         send_message(chat_id, "🚫 Доступ заблокирован.")
         return
-    if user["password_check"]:
-        clear_state(user["id"])
-        show_home(chat_id, user)
-        return
-    set_state(user["id"], "login_password")
-    send_message(chat_id, "🔐 Введите пароль доступа.")
+    mark_password_ok(user["id"])
+    clear_state(user["id"])
+    show_home(chat_id, get_user(telegram_id) or user)
 
 
 
@@ -1144,6 +1140,24 @@ def handle_admin_direct_receipt(chat_id, admin, message):
 
 def work_thread_id_for_message(message):
     return int(message.get("message_thread_id") or 0) or None
+
+
+def bind_drop_group(message):
+    chat_id = message["chat"]["id"]
+    thread_id = int(message.get("message_thread_id") or 0)
+    set_setting("drop_group_chat_id", chat_id)
+    set_setting("drop_group_thread_id", thread_id)
+    send_message(chat_id, "Группа дропов привязана. Теперь номера можно отправлять сюда.", message_thread_id=thread_id or None)
+    return True
+
+
+def bind_operator_group(message):
+    chat_id = message["chat"]["id"]
+    thread_id = int(message.get("message_thread_id") or 0)
+    set_setting("operator_group_chat_id", chat_id)
+    set_setting("operator_group_thread_id", thread_id)
+    send_message(chat_id, "Группа операторов привязана.", work_menu_keyboard(), message_thread_id=thread_id or None)
+    return True
 
 
 def operator_group_send(text, reply_markup=None):
@@ -1258,12 +1272,16 @@ def forward_code_to_drop_group(message):
 
 
 def handle_work_group_text(message):
-    if not work_enabled():
-        return False
     chat_id = message["chat"]["id"]
+    text = (message.get("text") or "").strip()
+    tg_from = message.get("from") or {}
+    if text.startswith("/set"):
+        return bind_drop_group(message)
+    if text.startswith("/op"):
+        return bind_operator_group(message)
+
     drop_chat_id = configured_drop_chat_id()
     operator_chat_id = configured_operator_chat_id()
-    tg_from = message.get("from") or {}
     if not tg_from.get("id"):
         return False
     user = create_or_touch_user(tg_from.get("id"), extract_username(tg_from))
@@ -1317,19 +1335,6 @@ def handle_text(message):
     user = create_or_touch_user(telegram_id, username)
     if user["is_blocked"]:
         send_message(chat_id, "🚫 Доступ заблокирован.")
-        return
-
-    if user["state"] == "login_password":
-        if text != get_access_password():
-            send_message(chat_id, "❌ Пароль неверный.")
-            return
-        mark_password_ok(user["id"])
-        clear_state(user["id"])
-        show_home(chat_id, get_user(telegram_id))
-        return
-
-    if not user["password_check"]:
-        send_message(chat_id, "🔐 Сначала войдите по паролю через /start.")
         return
 
     if user["state"] != "supplier_message":
@@ -1648,6 +1653,10 @@ def handle_work_callback(callback_id, callback, user, data):
         answer_callback(callback_id)
         return
     number_id = int(parts[2])
+    if number_id == 0:
+        send_next_available_to_operator_group()
+        answer_callback(callback_id, "Сначала возьмите номер.")
+        return
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
         if not row:
@@ -1765,9 +1774,6 @@ def handle_callback(callback):
         handle_work_callback(callback_id, callback, user, data)
         return
     delete_message(chat_id, callback["message"]["message_id"])
-    if not user["password_check"]:
-        answer_callback(callback_id, "Сначала войдите по паролю.", True)
-        return
 
     if data.startswith("menu:"):
         handle_menu_callback(callback_id, chat_id, user, data)
@@ -2017,7 +2023,6 @@ def clear_database():
             conn.execute(f"DELETE FROM {table}")
         conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('numbers', 'logs', 'withdrawals', 'users')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_reports_enabled', '0')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('access_password', ?)", (ADMIN_PASSWORD,))
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('price_per_number', '1')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('work_enabled', '0')")
         conn.commit()
