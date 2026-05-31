@@ -3,13 +3,26 @@ import os
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 
-# Один файл, б
+# Один файл, без requirements.txt и .env.
+# Заполните перед запуском. Можно также передать через переменные окружения.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGH9QWkNshyIlD8giWHhm93xKR26p7sCiE")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+
+DROP_GROUP_CHAT_ID = int(os.getenv("DROP_GROUP_CHAT_ID", "0") or 0)
+DROP_GROUP_THREAD_ID = int(os.getenv("DROP_GROUP_THREAD_ID", "0") or 0)
+OPERATOR_GROUP_CHAT_ID = int(os.getenv("OPERATOR_GROUP_CHAT_ID", "0") or 0)
+OPERATOR_GROUP_THREAD_ID = int(os.getenv("OPERATOR_GROUP_THREAD_ID", "0") or 0)
+
+# JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
+# Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
 # Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","Назад":"5368324170671202286"}'
 BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
 
@@ -20,7 +33,7 @@ BACK_BUTTON_CUSTOM_EMOJI_ID = os.getenv("BACK_BUTTON_CUSTOM_EMOJI_ID", "54272429
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8949311928]
+ADMIN_TELEGRAM_IDS = [8722322401]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -36,6 +49,23 @@ STATUS_CANCELLED = "cancelled"
 
 WITHDRAWAL_PENDING = "pending"
 WITHDRAWAL_DONE = "done"
+
+
+class TelegramAPIError(RuntimeError):
+    def __init__(self, method, status_code=None, description=None, response=None):
+        self.method = method
+        self.status_code = status_code
+        self.description = description or str(response)
+        self.response = response
+        super().__init__(f"Telegram API {method} failed: {self.description}")
+
+
+def is_bad_request(exc):
+    return isinstance(exc, TelegramAPIError) and exc.status_code == 400
+
+
+def is_conflict_error(exc):
+    return isinstance(exc, TelegramAPIError) and exc.status_code == 409
 
 
 def now_iso():
@@ -181,11 +211,33 @@ def api(method, data=None):
         raise RuntimeError("Укажите BOT_TOKEN в начале bot.py или через переменную окружения BOT_TOKEN.")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     body = urllib.parse.urlencode(data or {}).encode("utf-8")
-    with urllib.request.urlopen(url, body, timeout=60) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, body, timeout=60) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            result = {"description": raw or str(exc)}
+        raise TelegramAPIError(method, exc.code, result.get("description"), result) from exc
     if not result.get("ok"):
-        raise RuntimeError(result)
+        raise TelegramAPIError(method, description=result.get("description"), response=result)
     return result["result"]
+
+
+def strip_inline_keyboard_extras(reply_markup):
+    if not reply_markup or "inline_keyboard" not in reply_markup:
+        return reply_markup
+    return {
+        "inline_keyboard": [
+            [
+                {key: value for key, value in button.items() if key not in {"icon_custom_emoji_id", "style"}}
+                for button in row
+            ]
+            for row in reply_markup["inline_keyboard"]
+        ]
+    }
 
 
 def send_message(chat_id, text, reply_markup=None, entities=None, message_thread_id=None):
@@ -198,7 +250,32 @@ def send_message(chat_id, text, reply_markup=None, entities=None, message_thread
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     if entities:
         data["entities"] = json.dumps(entities, ensure_ascii=False)
-    return api("sendMessage", data)
+    try:
+        return api("sendMessage", data)
+    except TelegramAPIError as exc:
+        if not is_bad_request(exc):
+            raise
+        description = (exc.description or "").lower()
+        if "chat not found" in description:
+            return None
+        retry_data = dict(data)
+        if "message thread" in description or "message_thread_id" in description or "thread not found" in description:
+            retry_data.pop("message_thread_id", None)
+        if "icon_custom_emoji_id" in description or "style" in description or "reply markup" in description:
+            clean_markup = strip_inline_keyboard_extras(reply_markup)
+            if clean_markup:
+                retry_data["reply_markup"] = json.dumps(clean_markup, ensure_ascii=False)
+        if "document_invalid" in description or "entity" in description or "entities" in description:
+            retry_data.pop("entities", None)
+        if retry_data == data:
+            raise
+        try:
+            return api("sendMessage", retry_data)
+        except TelegramAPIError as retry_exc:
+            retry_description = (retry_exc.description or "").lower()
+            if is_bad_request(retry_exc) and "chat not found" in retry_description:
+                return None
+            raise
 
 
 
@@ -214,7 +291,12 @@ def answer_callback(callback_id, text=None, alert=False):
     data = {"callback_query_id": callback_id, "show_alert": "true" if alert else "false"}
     if text:
         data["text"] = text
-    return api("answerCallbackQuery", data)
+    try:
+        return api("answerCallbackQuery", data)
+    except TelegramAPIError as exc:
+        if is_bad_request(exc):
+            return None
+        raise
 
 
 
@@ -238,31 +320,65 @@ def send_document_bytes(chat_id, filename, content, caption=None, reply_markup=N
     if reply_markup:
         fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
-    body = bytearray()
-    for name, value in fields.items():
+    def perform_send(send_fields):
+        body = bytearray()
+        for name, value in send_fields.items():
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
         body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        body.extend(str(value).encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.encode("utf-8"))
+        body.extend(b"Content-Type: text/csv; charset=utf-8\r\n\r\n")
+        body.extend(content or b"\xef\xbb\xbf\n")
         body.extend(b"\r\n")
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
-    body.extend(f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.encode("utf-8"))
-    body.extend(b"Content-Type: text/csv; charset=utf-8\r\n\r\n")
-    body.extend(content)
-    body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-    request = urllib.request.Request(
-        url,
-        data=bytes(body),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        result = json.loads(response.read().decode("utf-8"))
-    if not result.get("ok"):
-        raise RuntimeError(result)
-    return result["result"]
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+        request = urllib.request.Request(
+            url,
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                result = {"description": raw or str(exc)}
+            raise TelegramAPIError("sendDocument", exc.code, result.get("description"), result) from exc
+        if not result.get("ok"):
+            raise TelegramAPIError("sendDocument", description=result.get("description"), response=result)
+        return result["result"]
+
+    try:
+        return perform_send(fields)
+    except TelegramAPIError as exc:
+        if not is_bad_request(exc):
+            raise
+        description = (exc.description or "").lower()
+        if "chat not found" in description:
+            return None
+        retry_fields = dict(fields)
+        if "document_invalid" in description or "entity" in description or "entities" in description:
+            retry_fields.pop("caption_entities", None)
+        if "reply markup" in description or "icon_custom_emoji_id" in description or "style" in description:
+            clean_markup = strip_inline_keyboard_extras(reply_markup)
+            if clean_markup:
+                retry_fields["reply_markup"] = json.dumps(clean_markup, ensure_ascii=False)
+        if retry_fields == fields:
+            raise
+        try:
+            return perform_send(retry_fields)
+        except TelegramAPIError as retry_exc:
+            retry_description = (retry_exc.description or "").lower()
+            if is_bad_request(retry_exc) and "chat not found" in retry_description:
+                return None
+            raise
 
 def role_title(role):
     return {ROLE_OPERATOR: "оператор", ROLE_SUPPLIER: "поставщик"}.get(role, role)
@@ -373,7 +489,7 @@ TEXT_CUSTOM_EMOJI_RULES = [
     ("ворк закончен.", "📭", "5427193629540128339"),
     ("Работа закончена.", "📭", "5427193629540128339"),
     ("Добавлено номеров:", "📱", "5426881849274179100"),
-    ("Моя очередь", "📦", "5427174611424944827"),
+    ("Моя очередь", "📦", "5426906459436780975"),
     ("Всего номеров в очереди:", "🔢", "5426875956579051157"),
     ("Нажмите номер, чтобы убрать его из очереди.", "👇", "5427293277076366247"),
     ("убран из очереди.", "🧹", "5426844457288897234"),
@@ -414,6 +530,12 @@ TEXT_CUSTOM_EMOJI_RULES = [
     ("Введите текст или чек", "✍️", "5426998632616895318"),
     ("Ваш вывод", "💸", "5427341851218576402"),
     ("Сообщение отправлено пользователю", "✅", "5427334710156942470"),
+    ("он встал.", "✅", "5426980427363556942"),
+    ("не встал.", "❌", "5426844457288897234"),
+    ("Повторный код нужен по номеру", "🔁", "5427092753643249034"),
+    ("запрошен повтор кода", "🔁", "5427092753643249034"),
+    ("Рассылка по операторам отправлена.", "📣", "5427181187019874230"),
+    ("Рассылка по поставщикам отправлена.", "📣", "5427181187019874230"),
     ("По номеру", "✅", "5427038101662991630"),
     ("Зачислено", "💰", "5427142415174408197"),
     ("Введите сообщение для пользователя", "✉️", "5427218386121830403"),
@@ -422,13 +544,12 @@ TEXT_CUSTOM_EMOJI_RULES = [
     ("Рассылка отправлена", "📣", "5427092120612812297"),
     ("заблокирован", "🚫", "5427170138402924177"),
     ("разблокирован", "✅", "5427315516091234833"),
-    ("Сейчас свободных номеров нет", "📭", "5427163026369041238"),
-    ("Взять номер", "📲", "5426893972238379207"),
-    ("Номер #", "📲", "5427306068270183297"),
+    ("Сейчас свободных номеров нет", "📭", "5427193629540128339"),
+    ("Взять номер", "📲", "5427191301667856308"),
+    ("Номер #", "📲", "5427350258407480293"),
     ("Повтор кода", "🔁", "5427242137683936643"),
     ("Скипнуть", "⏭️", "5427183658234842113"),
-    ("Код по номеру", "🔢", "5427241288591873281"),
-    ("запрошен повтор кода", "🔁", "5427367202359124481"),
+    ("Код по номеру", "🔢", "5427350258407480293"),
     ("Укажите причину, почему не встал", "❌", "5427251268395021237"),
     ("возвращен в очередь", "⏭️", "5427103057269793539"),
 ]
@@ -554,10 +675,7 @@ def delete_state_prompt(chat_id, user):
 
 
 def main_menu_keyboard(user):
-    rows = []
-    if user["is_admin"]:
-        rows.append([("Админ-панель", "menu:admin")])
-    return inline_keyboard(rows)
+    return inline_keyboard([])
 
 
 def admin_keyboard():
@@ -597,6 +715,7 @@ def operator_active_keyboard(number_id):
 
 def work_menu_keyboard():
     return inline_keyboard([
+        [("Взять номер", "work:take_next:0", {"icon_custom_emoji_id": "5427191301667856308"})],
         [("След номер", "work:next:0", {"icon_custom_emoji_id": "5427304070329177027"})],
         [
             ("Встал", "work:done:0", {"icon_custom_emoji_id": "5426881849274179100"}),
@@ -838,8 +957,10 @@ def log_event(actor_user_id, event_type, number_id=None, details=None):
 
 
 def show_home(chat_id, user):
-    reply_markup = main_menu_keyboard(user) if chat_id > 0 else None
-    send_message(chat_id, "Меню", reply_markup)
+    if user["is_admin"]:
+        send_message(chat_id, "Админ-панель", admin_keyboard())
+        return
+    send_message(chat_id, "Меню", None)
 
 
 def build_global_stats():
@@ -1021,7 +1142,7 @@ def send_report_file(chat_id, admin):
     content = build_report_csv(status_filter, date_from, date_to)
     period = data.get("report_period", "all")
     filename = f"report_{status_filter}_{period.replace(' ', '_')}.csv"
-    send_document_bytes(chat_id, filename, content, "📄 Отчет готов", admin_keyboard())
+    send_document_bytes(chat_id, filename, content, "Отчет готов", admin_keyboard())
     clear_state(admin["id"])
 
 def build_operator_stats():
@@ -1331,9 +1452,6 @@ def handle_work_group_text(message):
         return True
     if in_operator_topic:
         user = set_user_role(user["id"], ROLE_OPERATOR)
-        if text.lower() == "номер":
-            send_next_available_to_operator_group(user)
-            return True
         forward_code_to_drop_group(message)
         return True
     return False
@@ -1660,7 +1778,7 @@ def handle_broadcast_text(chat_id, admin, text, entities=None):
     clear_state(admin["id"])
     log_event(admin["id"], "broadcast", details=f"target={target};sent={sent}")
     if sent:
-        send_message(chat_id, f"📣 Рассылка по {target_title} отправлена.", admin_keyboard())
+        send_message(chat_id, f"Рассылка по {target_title} отправлена.", admin_keyboard())
     else:
         send_message(chat_id, f"📣 Группа для рассылки по {target_title} не привязана.", admin_keyboard())
 
@@ -1702,7 +1820,7 @@ def send_next_available_to_operator_group(operator_user=None, exclude_number_id=
                 conn.commit()
             prompt = send_message(
                 row["source_chat_id"] or configured_drop_chat_id(),
-                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на этот запрос.",
+                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на это сообщение.",
                 message_thread_id=row["source_thread_id"] or configured_drop_thread_id() or None,
             )
             if prompt:
@@ -1797,7 +1915,7 @@ def handle_work_callback(callback_id, callback, user, data):
                 conn.commit()
             prompt = send_message(
                 row["source_chat_id"] or configured_drop_chat_id(),
-                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на этот запрос.",
+                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на это сообщение.",
                 message_thread_id=row["source_thread_id"] or configured_drop_thread_id() or None,
             )
             if prompt:
@@ -1847,7 +1965,7 @@ def handle_work_callback(callback_id, callback, user, data):
                 conn.commit()
             prompt = send_message(
                 row["source_chat_id"] or configured_drop_chat_id(),
-                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на этот запрос.",
+                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на это сообщение.",
                 message_thread_id=row["source_thread_id"] or configured_drop_thread_id() or None,
             )
             if prompt:
@@ -1878,7 +1996,7 @@ def handle_work_callback(callback_id, callback, user, data):
             conn.commit()
             log_event(user["id"], "number_done", number_id)
             send_message(chat_id, f"По номеру {row['masked_number']} он встал.", work_menu_keyboard(), message_thread_id=configured_operator_thread_id() or None)
-            send_message(source_chat_id, f"По номеру {row['masked_number']} он встал.\nЗачислено {money_text(get_price_per_number())}.", message_thread_id=source_thread_id)
+            send_message(source_chat_id, f"По номеру {row['masked_number']} он встал.", message_thread_id=source_thread_id)
         elif action == "failed":
             conn.execute(
                 "UPDATE numbers SET status = ?, remaining = 0, completed_at = ?, last_reason = ? WHERE id = ?",
@@ -1891,7 +2009,13 @@ def handle_work_callback(callback_id, callback, user, data):
         elif action == "repeat_code":
             log_event(user["id"], "repeat_message_requested", number_id)
             send_message(chat_id, f"По номеру {row['masked_number']} запрошен повтор кода.", work_active_keyboard(number_id), message_thread_id=configured_operator_thread_id() or None)
-            send_message(source_chat_id, f"Повторный код нужен по номеру {row['masked_number']}.", message_thread_id=source_thread_id)
+            prompt = send_message(source_chat_id, f"Повторный код нужен по номеру, введите код в ответ на это сообщение {row['masked_number']}.", message_thread_id=source_thread_id)
+            if prompt:
+                conn.execute(
+                    "UPDATE numbers SET source_chat_id = ?, source_thread_id = ?, source_message_id = ? WHERE id = ?",
+                    (source_chat_id, source_thread_id or 0, prompt.get("message_id"), number_id),
+                )
+                conn.commit()
     answer_callback(callback_id)
 
 
@@ -1964,7 +2088,7 @@ def handle_menu_callback(callback_id, chat_id, user, data):
         take_number(chat_id, user)
     elif action == "admin":
         if user["is_admin"]:
-            send_message(chat_id, "🛠️ Админ-панель", admin_keyboard())
+            send_message(chat_id, "Админ-панель", admin_keyboard())
         else:
             send_message(chat_id, "⛔ Нет доступа.", main_menu_keyboard(user))
     answer_callback(callback_id)
@@ -2273,7 +2397,7 @@ def take_number(chat_id, user):
             supplier["telegram_id"],
             supplier["id"],
             "supplier_message",
-            f"📩 Ваш номер {row['masked_number']} взяли.\nВведите код для оператора ответом на этот запрос.",
+            f"📩 Ваш номер {row['masked_number']} взяли.\nВведите код для оператора ответом на это сообщение.",
             {"number_id": row["id"]},
             supplier_number_keyboard(row["id"]),
         )
@@ -2336,10 +2460,9 @@ def handle_operator_callback(callback_id, chat_id, user, data):
             )
             conn.commit()
             log_event(user["id"], "number_done", number_id)
-            price = get_price_per_number()
-            send_message(chat_id, f"✅ По номеру {row['masked_number']} он встал.", main_menu_keyboard(user))
+            send_message(chat_id, f"По номеру {row['masked_number']} он встал.", main_menu_keyboard(user))
             if supplier:
-                send_message(supplier["telegram_id"], f"✅ По номеру {row['masked_number']} он встал.\n💰 Зачислено {money_text(price)}.")
+                send_message(supplier["telegram_id"], f"По номеру {row['masked_number']} он встал.")
         elif action == "repeat_message":
             conn.commit()
             log_event(user["id"], "repeat_message_requested", number_id)
@@ -2349,7 +2472,7 @@ def handle_operator_callback(callback_id, chat_id, user, data):
                     supplier["telegram_id"],
                     supplier["id"],
                     "supplier_message",
-                    f"🔁 Оператор запросил повтор кода по номеру {row['masked_number']}.\nВведите новый код ответом на этот запрос.",
+                    f"Повторный код нужен по номеру, введите код в ответ на это сообщение {row['masked_number']}.",
                     {"number_id": number_id},
                     supplier_number_keyboard(number_id),
                 )
@@ -2512,14 +2635,14 @@ def handle_admin_callback(callback_id, chat_id, user, data):
     action = data.split(":")[1]
     if action == "panel":
         clear_state(user["id"])
-        send_message(chat_id, "🛠️ Админ-панель", admin_keyboard())
+        send_message(chat_id, "Админ-панель", admin_keyboard())
     elif action == "start_work":
         set_bool_setting("work_enabled", True)
         drop_chat_id = configured_drop_chat_id() or chat_id
         if not configured_drop_chat_id():
             set_setting("drop_group_chat_id", drop_chat_id)
         send_message(drop_chat_id, "номера, работаем!", message_thread_id=configured_drop_thread_id() or None)
-        send_message(chat_id, "🛠️ Админ-панель", admin_keyboard())
+        send_message(chat_id, "Админ-панель", admin_keyboard())
     elif action == "stop_work":
         set_bool_setting("work_enabled", False)
         drop_chat_id = configured_drop_chat_id() or chat_id
@@ -2546,6 +2669,10 @@ def poll():
     init_db()
     offset = 0
     runtime_state = {"last_auto_report_at": time.time()}
+    try:
+        api("deleteWebhook", {"drop_pending_updates": "false"})
+    except TelegramAPIError as exc:
+        print(f"deleteWebhook warning: {exc.description}")
     print("Bot started.")
     while True:
         try:
@@ -2562,6 +2689,16 @@ def poll():
         except KeyboardInterrupt:
             print("Bot stopped.")
             break
+        except TelegramAPIError as exc:
+            if is_conflict_error(exc):
+                print("Error 409: запущен другой экземпляр бота или активен webhook. Остановите второй процесс/деплой; бот повторит попытку.")
+                time.sleep(10)
+            elif is_bad_request(exc):
+                print(f"Error 400 in {exc.method}: {exc.description}")
+                time.sleep(3)
+            else:
+                print(f"Telegram API error in {exc.method}: {exc.description}")
+                time.sleep(3)
         except Exception as exc:
             print(f"Error: {exc}")
             time.sleep(3)
