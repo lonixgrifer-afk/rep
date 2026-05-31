@@ -27,7 +27,7 @@ BACK_BUTTON_CUSTOM_EMOJI_ID = os.getenv("BACK_BUTTON_CUSTOM_EMOJI_ID", "54272429
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8949311928]
+ADMIN_TELEGRAM_IDS = [8722322401]
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
