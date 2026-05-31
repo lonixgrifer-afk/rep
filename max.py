@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 # Один файл, без requirements.txt и .env.
 # Заполните перед запуском. Можно также передать через переменные окружения.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGH9QWkNshyIlD8giWHhm93xKR26p7sCiE")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1111")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 # JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
