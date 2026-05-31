@@ -330,19 +330,19 @@ def parse_json_object(value):
 DEFAULT_BUTTON_CUSTOM_EMOJI_IDS = {
     "menu:add_number": "5427191301667856308",
     "menu:wallet": "5426879920833863274",
-    "menu:my_queue": "5427286731546205120",
+    "menu:my_queue": "5426906459436780975",
     "menu:withdraw": "5427268774287943522",
     "menu:admin": "5427080431382076756",
     "menu:take_number": "5426893972238379207",
-    "work:take": "5426893972238379207",
-    "work:next": "5427183658234842113",
-    "work:done": "5427086877478021137",
-    "work:failed": "5427376742512128795",
-    "work:repeat_code": "5427242137683936643",
-    "operator:repeat_message": "5427242137683936643",
-    "operator:done": "5427086877478021137",
-    "operator:failed": "5427376742512128795",
-    "operator:skip": "5427183658234842113",
+    "work:take": "5427191301667856308",
+    "work:next": "5427304070329177027",
+    "work:done": "5426881849274179100",
+    "work:failed": "5426844457288897234",
+    "work:repeat_code": "5426940471282816637",
+    "operator:repeat_message": "5426940471282816637",
+    "operator:done": "5426881849274179100",
+    "operator:failed": "5426844457288897234",
+    "operator:skip": "5427304070329177027",
     "supplier:repeat": "5427165523274144649",
     "supplier:cancel": "5426940471282816637",
     "admin:stats": "5426842013452506664",
@@ -362,6 +362,7 @@ DEFAULT_BUTTON_CUSTOM_EMOJI_IDS = {
     "admin:stop_work": "5426949632448043251",
     "broadcast:operators": "5426875956579051157",
     "broadcast:suppliers": "5427304070329177027",
+    "work:my_queue": "5426906459436780975",
 }
 BUTTON_CUSTOM_EMOJI_IDS = {
     **DEFAULT_BUTTON_CUSTOM_EMOJI_IDS,
@@ -371,6 +372,12 @@ BUTTON_STYLES = parse_json_object(BUTTON_STYLES_JSON)
 
 
 TEXT_CUSTOM_EMOJI_RULES = [
+    ("Группа операторов отвязана.", "📭", "5427193629540128339"),
+    ("Группа операторов привязана.", "📱", "5426881849274179100"),
+    ("Группа дропов привязана. Теперь номера можно отправлять сюда.", "📱", "5426881849274179100"),
+    ("Введите свой номер для сдачи.", "🚫", "5429421102659049990"),
+    ("Группа дропов отвязана.", "📭", "5427193629540128339"),
+    ("Ворк закончен.", "🧹", "5426844457288897234"),
     ("Статистика", "📊", "5426842013452506664"),
     ("Меню", "📋", "5427195553685479167"),
     ("Куда отправить рассылку?", "📣", "5427181187019874230"),
@@ -602,10 +609,13 @@ def operator_active_keyboard(number_id):
 
 def work_menu_keyboard():
     return inline_keyboard([
-        [("Взять номер", "work:next:0")],
-        [("След номер", "work:next:0")],
-        [("Встал", "work:done:0"), ("Не встал", "work:failed:0")],
-        [("Повторный код", "work:repeat_code:0")],
+        [("Взять номер", "work:take_next:0", {"icon_custom_emoji_id": "5427191301667856308"})],
+        [("След номер", "work:next:0", {"icon_custom_emoji_id": "5427304070329177027"})],
+        [
+            ("Встал", "work:done:0", {"icon_custom_emoji_id": "5426881849274179100"}),
+            ("Не встал", "work:failed:0", {"icon_custom_emoji_id": "5426844457288897234"}),
+        ],
+        [("Повторный код", "work:repeat_code:0", {"icon_custom_emoji_id": "5426940471282816637"})],
     ])
 
 
@@ -1175,7 +1185,7 @@ def drop_group_send(text, reply_markup=None):
 
 
 def supplier_queue_keyboard(supplier_user_id):
-    return inline_keyboard([[("Моя очередь", f"work:my_queue:{supplier_user_id}")]])
+    return inline_keyboard([[("Моя очередь", f"work:my_queue:{supplier_user_id}", {"icon_custom_emoji_id": "5426906459436780975"})]])
 
 
 def supplier_queue_lines(supplier_user_id):
@@ -1254,8 +1264,6 @@ def register_drop_numbers(message, supplier):
         supplier_queue_keyboard(supplier["id"]),
         message_thread_id=work_thread_id_for_message(message),
     )
-    if configured_operator_chat_id():
-        operator_group_send("Новый номер в очереди.", work_menu_keyboard())
     return True
 
 
@@ -1744,9 +1752,9 @@ def handle_work_callback(callback_id, callback, user, data):
         )
         answer_callback(callback_id)
         return
-    if action == "next":
+    if action in {"next", "take_next"}:
         number_id = int(parts[2]) if len(parts) > 2 else 0
-        if number_id:
+        if action == "next" and number_id:
             with closing(db()) as conn:
                 row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
                 if row and row["assigned_operator_user_id"] == user["id"] and row["status"] == STATUS_ASSIGNED:
