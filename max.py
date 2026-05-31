@@ -243,7 +243,10 @@ def send_document_bytes(chat_id, filename, content, caption=None, reply_markup=N
     boundary = f"----bot-boundary-{int(time.time() * 1000)}"
     fields = {"chat_id": str(chat_id)}
     if caption:
+        caption, caption_entities = premiumize_text(caption)
         fields["caption"] = caption
+        if caption_entities:
+            fields["caption_entities"] = json.dumps(caption_entities, ensure_ascii=False)
     if reply_markup:
         fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
@@ -357,6 +360,8 @@ DEFAULT_BUTTON_CUSTOM_EMOJI_IDS = {
     "admin:unblock": "5426980427363556942",
     "admin:start_work": "5427181187019874230",
     "admin:stop_work": "5426949632448043251",
+    "broadcast:operators": "5426875956579051157",
+    "broadcast:suppliers": "5427304070329177027",
 }
 BUTTON_CUSTOM_EMOJI_IDS = {
     **DEFAULT_BUTTON_CUSTOM_EMOJI_IDS,
@@ -366,6 +371,12 @@ BUTTON_STYLES = parse_json_object(BUTTON_STYLES_JSON)
 
 
 TEXT_CUSTOM_EMOJI_RULES = [
+    ("Статистика", "📊", "5426842013452506664"),
+    ("Меню", "📋", "5427195553685479167"),
+    ("Куда отправить рассылку?", "📣", "5427181187019874230"),
+    ("номера, работаем!", "📦", "5426875956579051157"),
+    ("ворк закончен.", "📭", "5427193629540128339"),
+    ("Работа закончена.", "📭", "5427193629540128339"),
     ("Добавлено номеров:", "📱", "5426881849274179100"),
     ("Моя очередь", "📦", "5427174611424944827"),
     ("Всего номеров в очереди:", "🔢", "5426875956579051157"),
@@ -400,7 +411,7 @@ TEXT_CUSTOM_EMOJI_RULES = [
     ("Статистика операторов", "📊", "5427184451000806450"),
     ("Операторов пока нет", "🎧", "5426919293126861502"),
     ("выдана роль оператора", "🎧", "5427122176311681284"),
-    ("Отчет готов", "📄", "5426938980838186107"),
+    ("Отчет готов", "📄", "5427244675226442797"),
     ("Ожидающих выводов нет", "💸", "5427376742512128795"),
     ("Выводы на обработке:", "💸", "5427311746200234273"),
     ("Выберите заявку", "👇", "5427116744865809706"),
@@ -836,7 +847,6 @@ def show_home(chat_id, user):
 
 def build_global_stats():
     with closing(db()) as conn:
-        taken = conn.execute("SELECT COUNT(*) count FROM logs WHERE event_type = 'number_taken'").fetchone()["count"]
         submitted = conn.execute("SELECT COUNT(*) count FROM numbers").fetchone()["count"]
     supplier_bindings = 1 if configured_drop_chat_id() else 0
     operator_bindings = 1 if configured_operator_chat_id() else 0
@@ -844,7 +854,6 @@ def build_global_stats():
         "📊 Статистика",
         f"Кол-во поставщиков (привязок): {supplier_bindings}",
         f"Кол-во операторов (привязок): {operator_bindings}",
-        f"Взято номеров: {taken}",
         f"Сдано номеров: {submitted}",
     ]
     return "\n".join(lines)
@@ -1312,7 +1321,11 @@ def handle_work_group_text(message):
     if not tg_from.get("id"):
         return False
     user = create_or_touch_user(tg_from.get("id"), extract_username(tg_from))
-    if same_topic(message, drop_chat_id, configured_drop_thread_id()):
+    in_drop_topic = same_topic(message, drop_chat_id, configured_drop_thread_id())
+    in_operator_topic = same_topic(message, operator_chat_id, configured_operator_thread_id())
+    if not work_enabled():
+        return in_drop_topic or in_operator_topic
+    if in_drop_topic:
         if forward_code_to_operator_group(message) or register_drop_numbers(message, user):
             return True
         send_message(
@@ -1321,7 +1334,7 @@ def handle_work_group_text(message):
             message_thread_id=work_thread_id_for_message(message),
         )
         return True
-    if same_topic(message, operator_chat_id, configured_operator_thread_id()):
+    if in_operator_topic:
         set_user_role(user["id"], ROLE_OPERATOR)
         forward_code_to_drop_group(message)
         return True
@@ -1715,6 +1728,9 @@ def handle_work_callback(callback_id, callback, user, data):
     chat_id = callback["message"]["chat"]["id"]
     if configured_operator_chat_id() and chat_id == configured_operator_chat_id():
         user = set_user_role(user["id"], ROLE_OPERATOR)
+    if action not in {"my_queue"} and not work_enabled():
+        answer_callback(callback_id, "Ворк закончен.", True)
+        return
     if action == "my_queue":
         supplier_user_id = int(parts[2]) if len(parts) > 2 else user["id"]
         if supplier_user_id != user["id"]:
@@ -1761,17 +1777,43 @@ def handle_work_callback(callback_id, callback, user, data):
             if row["status"] != STATUS_AVAILABLE:
                 answer_callback(callback_id, "Номер уже не свободен.", True)
                 return
-            conn.execute("UPDATE numbers SET pending_operator_user_id = ? WHERE id = ?", (user["id"], number_id))
+            conn.execute(
+                """
+                UPDATE numbers
+                SET status = ?, assigned_operator_user_id = ?, assigned_at = ?, pending_operator_user_id = NULL
+                WHERE id = ?
+                """,
+                (STATUS_ASSIGNED, user["id"], now_iso(), number_id),
+            )
             conn.commit()
-            supplier = conn.execute("SELECT * FROM users WHERE id = ?", (row["supplier_user_id"],)).fetchone()
-            handle = user_handle(user)
-            send_message(
+            log_event(user["id"], "number_taken", number_id)
+            message = operator_group_send(
+                f"Номер #{number_id} взят.\nНомер: {row['masked_number']}\nОжидайте код от поставщика.",
+                work_active_keyboard(number_id),
+            )
+            if message:
+                conn.execute(
+                    "UPDATE numbers SET operator_chat_id = ?, operator_thread_id = ?, operator_message_id = ? WHERE id = ?",
+                    (configured_operator_chat_id(), configured_operator_thread_id(), message.get("message_id"), number_id),
+                )
+                conn.commit()
+            prompt = send_message(
                 row["source_chat_id"] or configured_drop_chat_id(),
-                f"Оператор {handle} хочет взять номер {row['masked_number']}. Выдать номер?",
-                work_approve_keyboard(number_id, user["id"]),
+                f"Ваш номер {row['masked_number']} взяли. Введите код для оператора ответом на этот запрос.",
                 message_thread_id=row["source_thread_id"] or configured_drop_thread_id() or None,
             )
-            answer_callback(callback_id, "Запрос отправлен тому, кто выдал номер.")
+            if prompt:
+                conn.execute(
+                    "UPDATE numbers SET source_chat_id = ?, source_thread_id = ?, source_message_id = ? WHERE id = ?",
+                    (
+                        row["source_chat_id"] or configured_drop_chat_id(),
+                        row["source_thread_id"] or configured_drop_thread_id(),
+                        prompt.get("message_id"),
+                        number_id,
+                    ),
+                )
+                conn.commit()
+            answer_callback(callback_id, "Номер выдан.")
             return
         if action in {"approve", "reject"}:
             operator_user_id = int(parts[3]) if len(parts) > 3 else row["pending_operator_user_id"]
@@ -2479,9 +2521,7 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         if not configured_drop_chat_id():
             set_setting("drop_group_chat_id", drop_chat_id)
         send_message(drop_chat_id, "номера, работаем!", message_thread_id=configured_drop_thread_id() or None)
-        if configured_operator_chat_id():
-            operator_group_send("Работа начата. Нажмите «Взять номер».", work_menu_keyboard())
-        send_message(chat_id, "Ворк начат.", admin_keyboard())
+        send_message(chat_id, "🛠️ Админ-панель", admin_keyboard())
     elif action == "stop_work":
         set_bool_setting("work_enabled", False)
         drop_chat_id = configured_drop_chat_id() or chat_id
@@ -2491,50 +2531,11 @@ def handle_admin_callback(callback_id, chat_id, user, data):
         send_message(chat_id, "Ворк закончен.", admin_keyboard())
     elif action == "stats":
         send_message(chat_id, build_global_stats(), admin_keyboard())
-    elif action == "operator_stats":
-        send_message(chat_id, build_operator_stats(), admin_keyboard())
-    elif action == "auto_report":
-        send_message(chat_id, build_auto_report(), admin_keyboard())
     elif action == "report_file":
         set_state(user["id"], "admin_report_date", {"report_status": "all", "report_period": "all"})
         send_report_file(chat_id, get_user(user["telegram_id"]))
-    elif action == "withdrawals":
-        show_withdrawals(chat_id)
-    elif action == "global_queue":
-        show_global_queue(chat_id)
-    elif action == "direct_message":
-        show_user_picker(chat_id, "usermsg", "✉️ Выберите пользователя, которому написать:")
-    elif action == "change_password":
-        send_state_prompt(chat_id, user["id"], "admin_change_password", "🔐 Введите новый пароль доступа к боту.", back_to="admin:panel")
-    elif action == "change_price":
-        send_state_prompt(chat_id, user["id"], "admin_change_price", f"💵 Текущий прайс: {money_text(get_price_per_number())} за номер. Введите новый прайс.", back_to="admin:panel")
-    elif action == "clear_db":
-        send_message(
-            chat_id,
-            "🧨 Точно очистить всю базу? Будут удалены пользователи, номера, логи и выводы.",
-            inline_keyboard([[("✅ Да, очистить", "db:clear_confirm")], [("❌ Отмена", "db:clear_cancel")], admin_back_row()]),
-        )
-    elif action == "grant_operator":
-        send_state_prompt(chat_id, user["id"], "grant_operator", "🎧 Введите @username пользователя, которому выдать роль оператора.", back_to="admin:panel")
-    elif action == "reset_queue":
-        with closing(db()) as conn:
-            conn.execute(
-                """
-                UPDATE numbers
-                SET status = ?, assigned_operator_user_id = NULL, assigned_at = NULL
-                WHERE status = ?
-                """,
-                (STATUS_AVAILABLE, STATUS_ASSIGNED),
-            )
-            conn.commit()
-        log_event(user["id"], "queue_reset")
-        send_message(chat_id, "♻️ Очередь сброшена: активные заявки возвращены в доступные.", admin_keyboard())
     elif action == "broadcast":
         send_message(chat_id, "📣 Куда отправить рассылку?", broadcast_target_keyboard())
-    elif action == "block":
-        send_state_prompt(chat_id, user["id"], "block_user", "🚫 Введите @username пользователя для блокировки.", back_to="admin:panel")
-    elif action == "unblock":
-        send_state_prompt(chat_id, user["id"], "unblock_user", "✅ Введите @username пользователя для разблокировки.", back_to="admin:panel")
     answer_callback(callback_id)
 
 
