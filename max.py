@@ -9,19 +9,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 
-# Один файл, без requirements.txt и .env.
-# Заполните перед запуском. Можно также передать через переменные окружения.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8680736365:AAGHQWkNshyIlD8giWHhm93xKR26p7sCiE")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-this-password")
-DB_PATH = os.getenv("DB_PATH", "bot.db")
-
-DROP_GROUP_CHAT_ID = int(os.getenv("DROP_GROUP_CHAT_ID", "0") or 0)
-DROP_GROUP_THREAD_ID = int(os.getenv("DROP_GROUP_THREAD_ID", "0") or 0)
-OPERATOR_GROUP_CHAT_ID = int(os.getenv("OPERATOR_GROUP_CHAT_ID", "0") or 0)
-OPERATOR_GROUP_THREAD_ID = int(os.getenv("OPERATOR_GROUP_THREAD_ID", "0") or 0)
-
-# JSON-словарь для премиум-эмодзи в inline-кнопках актуального Bot API.
-# Ключ — callback_data кнопки или ее текст, значение — custom_emoji_id.
+# Один файл, б
 # Пример: BUTTON_CUSTOM_EMOJI_IDS='{"menu:admin":"5368324170671202286","Назад":"5368324170671202286"}'
 BUTTON_CUSTOM_EMOJI_IDS_JSON = os.getenv("BUTTON_CUSTOM_EMOJI_IDS", "{}")
 
