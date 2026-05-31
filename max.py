@@ -609,7 +609,6 @@ def operator_active_keyboard(number_id):
 
 def work_menu_keyboard():
     return inline_keyboard([
-        [("Взять номер", "work:take_next:0", {"icon_custom_emoji_id": "5427191301667856308"})],
         [("След номер", "work:next:0", {"icon_custom_emoji_id": "5427304070329177027"})],
         [
             ("Встал", "work:done:0", {"icon_custom_emoji_id": "5426881849274179100"}),
@@ -1343,7 +1342,10 @@ def handle_work_group_text(message):
         )
         return True
     if in_operator_topic:
-        set_user_role(user["id"], ROLE_OPERATOR)
+        user = set_user_role(user["id"], ROLE_OPERATOR)
+        if text.lower() == "номер":
+            send_next_available_to_operator_group(user)
+            return True
         forward_code_to_drop_group(message)
         return True
     return False
