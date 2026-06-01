@@ -46,7 +46,7 @@ def parse_id_list(value):
     return ids
 
 GIVE_TELEGRAM_IDS = parse_id_list(os.getenv("GIVE_TELEGRAM_IDS", ""))
-ANONYMOUS_ADMIN_TELEGRAM_ID = 1087968824
+ANONYMOUS_ADMIN_TELEGRAM_ID = 8949311928
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -1336,8 +1336,18 @@ def group_member_label(row):
     return name or f"id {row['telegram_id']}"
 
 
-def known_operator_group_members(chat_id, thread_id):
+def known_operator_group_members(chat_id, thread_id=None):
     with closing(db()) as conn:
+        if thread_id is None:
+            return conn.execute(
+                """
+                SELECT telegram_id, username, first_name, last_name, last_seen_at
+                FROM group_members
+                WHERE chat_id = ?
+                ORDER BY username IS NULL, lower(username), telegram_id
+                """,
+                (chat_id,),
+            ).fetchall()
         return conn.execute(
             """
             SELECT telegram_id, username, first_name, last_name, last_seen_at
@@ -1347,6 +1357,15 @@ def known_operator_group_members(chat_id, thread_id):
             """,
             (chat_id, thread_id),
         ).fetchall()
+
+
+def give_member_list_text(rows):
+    if not rows:
+        return "Пока нет сохраненных пользователей из группы /op."
+    lines = ["👥 Юзернеймы из группы /op:"]
+    for row in rows[:100]:
+        lines.append(f"• {group_member_label(row)}")
+    return "\n".join(lines)
 
 
 def find_give_target(message, argument):
@@ -1408,15 +1427,25 @@ def handle_give_command(message, issuer=None):
     if not rows:
         send_message(
             chat_id,
-            "Пока нет сохраненных пользователей этой группы. Пусть пользователь напишет любое сообщение или используйте /give <telegram_id>.",
+            "Пока нет сохраненных пользователей из группы /op.",
             message_thread_id=thread_id or None,
         )
         return True
-    lines = ["👥 Пользователи этой группы, которых видел бот:"]
-    for row in rows[:80]:
-        lines.append(f"• {group_member_label(row)} — id {row['telegram_id']}")
-    lines.append("\nЧтобы выдать оператора: /give @username, /give telegram_id или ответьте /give на сообщение пользователя.")
-    send_message(chat_id, "\n".join(lines), message_thread_id=thread_id or None)
+    send_message(chat_id, give_member_list_text(rows), message_thread_id=thread_id or None)
+    return True
+
+
+def handle_private_give_command(chat_id, user):
+    if not can_use_give_command({"chat": {"id": chat_id}, "from": {"id": user["telegram_id"]}}, user):
+        send_message(chat_id, "⛔ /give доступна только админу или отдельным ID из GIVE_TELEGRAM_IDS.")
+        return True
+    operator_chat_id = configured_operator_chat_id()
+    if not operator_chat_id:
+        send_message(chat_id, "Группа операторов еще не привязана командой /op.")
+        return True
+    thread_id = configured_operator_thread_id()
+    rows = known_operator_group_members(operator_chat_id, thread_id if thread_id else None)
+    send_message(chat_id, give_member_list_text(rows))
     return True
 
 
@@ -1601,6 +1630,8 @@ def forward_code_to_drop_group(message):
 
 def handle_work_group_text(message):
     chat_id = message["chat"]["id"]
+    if chat_id > 0:
+        return False
     text = (message.get("text") or "").strip()
     tg_from = message.get("from") or {}
     remember_group_member(message)
@@ -1681,6 +1712,11 @@ def handle_text(message):
     user = create_or_touch_user(telegram_id, username)
     if user["is_blocked"]:
         send_message(chat_id, "🚫 Доступ заблокирован.")
+        return
+
+    if text.startswith("/give"):
+        clear_state(user["id"])
+        handle_private_give_command(chat_id, user)
         return
 
     if user["state"] != "supplier_message":
