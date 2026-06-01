@@ -33,7 +33,7 @@ BACK_BUTTON_CUSTOM_EMOJI_ID = os.getenv("BACK_BUTTON_CUSTOM_EMOJI_ID", "54272429
 BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
-ADMIN_TELEGRAM_IDS = [8722322401]
+ADMIN_TELEGRAM_IDS = [8684253040]
 
 # Отдельные Telegram ID, которым разрешена команда /give в группе операторов.
 # Формат переменной окружения GIVE_TELEGRAM_IDS: "123,456". Если список пустой, /give доступна админам.
