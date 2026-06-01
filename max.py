@@ -35,6 +35,19 @@ BUTTON_STYLES_JSON = os.getenv("BUTTON_STYLES", "{}")
 # Если список пустой, первый вошедший пользователь автоматически станет админом.
 ADMIN_TELEGRAM_IDS = [8949311928]
 
+# Отдельные Telegram ID, которым разрешена команда /give в группе операторов.
+# Формат переменной окружения GIVE_TELEGRAM_IDS: "123,456". Если список пустой, /give доступна админам.
+def parse_id_list(value):
+    ids = []
+    for part in str(value or "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.append(int(part))
+    return ids
+
+GIVE_TELEGRAM_IDS = parse_id_list(os.getenv("GIVE_TELEGRAM_IDS", ""))
+ANONYMOUS_ADMIN_TELEGRAM_ID = 1087968824
+
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
 
@@ -141,6 +154,17 @@ def init_db():
                 created_at TEXT NOT NULL,
                 completed_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS group_members (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, thread_id, telegram_id)
+            );
             """
         )
         migrate_schema(conn)
@@ -159,6 +183,20 @@ def init_db():
 
 
 def migrate_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_members (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            telegram_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (chat_id, thread_id, telegram_id)
+        )
+        """
+    )
     user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "public_id" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN public_id TEXT")
@@ -960,7 +998,7 @@ def show_home(chat_id, user):
     if user["is_admin"]:
         send_message(chat_id, "Админ-панель", admin_keyboard())
         return
-    send_message(chat_id, "Меню", None)
+    send_message(chat_id, "(бот для админов)", None)
 
 
 def build_global_stats():
@@ -1244,6 +1282,144 @@ def handle_admin_direct_receipt(chat_id, admin, message):
     send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_handle(target)}.", admin_keyboard())
 
 
+def is_real_telegram_user(tg_from):
+    return bool(tg_from and tg_from.get("id") and tg_from.get("id") != ANONYMOUS_ADMIN_TELEGRAM_ID)
+
+
+def remember_group_member(message):
+    tg_from = message.get("from") or {}
+    if not is_real_telegram_user(tg_from):
+        return
+    chat_id = message["chat"]["id"]
+    thread_id = int(message.get("message_thread_id") or 0)
+    with closing(db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO group_members (chat_id, thread_id, telegram_id, username, first_name, last_name, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, thread_id, telegram_id) DO UPDATE SET
+                username = COALESCE(excluded.username, group_members.username),
+                first_name = COALESCE(excluded.first_name, group_members.first_name),
+                last_name = COALESCE(excluded.last_name, group_members.last_name),
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                chat_id,
+                thread_id,
+                tg_from["id"],
+                extract_username(tg_from),
+                tg_from.get("first_name"),
+                tg_from.get("last_name"),
+                now_iso(),
+            ),
+        )
+        conn.commit()
+
+
+def can_use_give_command(message, user=None):
+    tg_from = message.get("from") or {}
+    telegram_id = tg_from.get("id")
+    sender_chat_id = (message.get("sender_chat") or {}).get("id")
+    allowed_ids = GIVE_TELEGRAM_IDS or ADMIN_TELEGRAM_IDS
+    if telegram_id in allowed_ids:
+        return True
+    if user and user["is_admin"]:
+        return True
+    # Сообщение от имени группы появляется у анонимных администраторов Telegram.
+    return telegram_id == ANONYMOUS_ADMIN_TELEGRAM_ID and sender_chat_id == message["chat"]["id"]
+
+
+def group_member_label(row):
+    if row["username"]:
+        return f"@{row['username']}"
+    name = " ".join(part for part in (row["first_name"], row["last_name"]) if part)
+    return name or f"id {row['telegram_id']}"
+
+
+def known_operator_group_members(chat_id, thread_id):
+    with closing(db()) as conn:
+        return conn.execute(
+            """
+            SELECT telegram_id, username, first_name, last_name, last_seen_at
+            FROM group_members
+            WHERE chat_id = ? AND thread_id = ?
+            ORDER BY username IS NULL, lower(username), telegram_id
+            """,
+            (chat_id, thread_id),
+        ).fetchall()
+
+
+def find_give_target(message, argument):
+    reply_from = (message.get("reply_to_message") or {}).get("from") or {}
+    if not argument and is_real_telegram_user(reply_from):
+        return create_or_touch_user(reply_from["id"], extract_username(reply_from))
+
+    value = (argument or "").strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        return get_user_by_handle(value)
+    if value.upper().startswith("U") and value[1:].isdigit():
+        with closing(db()) as conn:
+            return conn.execute("SELECT * FROM users WHERE public_id = ?", (value.upper(),)).fetchone()
+    if value.lstrip("-").isdigit():
+        telegram_id = int(value)
+        username = None
+        with closing(db()) as conn:
+            member = conn.execute(
+                """
+                SELECT username
+                FROM group_members
+                WHERE chat_id = ? AND thread_id = ? AND telegram_id = ?
+                """,
+                (message["chat"]["id"], int(message.get("message_thread_id") or 0), telegram_id),
+            ).fetchone()
+            if member:
+                username = member["username"]
+        return create_or_touch_user(telegram_id, username)
+    return None
+
+
+def handle_give_command(message, issuer=None):
+    chat_id = message["chat"]["id"]
+    thread_id = int(message.get("message_thread_id") or 0)
+    if not same_topic(message, configured_operator_chat_id(), configured_operator_thread_id()):
+        send_message(chat_id, "⚠️ /give работает только в группе операторов, привязанной командой /op.", message_thread_id=thread_id or None)
+        return True
+    if not can_use_give_command(message, issuer):
+        send_message(chat_id, "⛔ /give доступна только админу или отдельным ID из GIVE_TELEGRAM_IDS.", message_thread_id=thread_id or None)
+        return True
+
+    text = (message.get("text") or "").strip()
+    parts = text.split(maxsplit=1)
+    argument = parts[1].strip() if len(parts) > 1 else ""
+    target = find_give_target(message, argument)
+    if target:
+        target = set_user_role(target["id"], ROLE_OPERATOR)
+        log_event(issuer["id"] if issuer else target["id"], "give_operator", details=user_handle(target))
+        send_message(
+            chat_id,
+            f"🎧 {user_handle(target)} назначен оператором. Можно брать номера в этой группе.",
+            message_thread_id=thread_id or None,
+        )
+        return True
+
+    rows = known_operator_group_members(chat_id, thread_id)
+    if not rows:
+        send_message(
+            chat_id,
+            "Пока нет сохраненных пользователей этой группы. Пусть пользователь напишет любое сообщение или используйте /give <telegram_id>.",
+            message_thread_id=thread_id or None,
+        )
+        return True
+    lines = ["👥 Пользователи этой группы, которых видел бот:"]
+    for row in rows[:80]:
+        lines.append(f"• {group_member_label(row)} — id {row['telegram_id']}")
+    lines.append("\nЧтобы выдать оператора: /give @username, /give telegram_id или ответьте /give на сообщение пользователя.")
+    send_message(chat_id, "\n".join(lines), message_thread_id=thread_id or None)
+    return True
+
+
 def work_thread_id_for_message(message):
     return int(message.get("message_thread_id") or 0) or None
 
@@ -1427,16 +1603,20 @@ def handle_work_group_text(message):
     chat_id = message["chat"]["id"]
     text = (message.get("text") or "").strip()
     tg_from = message.get("from") or {}
+    remember_group_member(message)
+    issuer = create_or_touch_user(tg_from.get("id"), extract_username(tg_from)) if is_real_telegram_user(tg_from) else None
     if text.startswith("/set"):
         return bind_drop_group(message)
     if text.startswith("/op"):
         return bind_operator_group(message)
+    if text.startswith("/give"):
+        return handle_give_command(message, issuer)
 
     drop_chat_id = configured_drop_chat_id()
     operator_chat_id = configured_operator_chat_id()
-    if not tg_from.get("id"):
+    if not issuer:
         return False
-    user = create_or_touch_user(tg_from.get("id"), extract_username(tg_from))
+    user = issuer
     in_drop_topic = same_topic(message, drop_chat_id, configured_drop_thread_id())
     in_operator_topic = same_topic(message, operator_chat_id, configured_operator_thread_id())
     if not work_enabled():
