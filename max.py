@@ -45,8 +45,8 @@ def parse_id_list(value):
             ids.append(int(part))
     return ids
 
-GIVE_TELEGRAM_IDS = parse_id_list(os.getenv("GIVE_TELEGRAM_IDS", ""))
-ANONYMOUS_ADMIN_TELEGRAM_ID = 8949311928
+GIVE_TELEGRAM_IDS = parse_id_list(os.getenv("GIVE_TELEGRAM_IDS", "8949311928"))
+ANONYMOUS_ADMIN_TELEGRAM_ID = 1087968824
 
 # Как часто слать автоотчет админам, если автоотчеты включены.
 AUTO_REPORT_INTERVAL_SECONDS = 60 * 60
@@ -165,6 +165,13 @@ def init_db():
                 last_seen_at TEXT NOT NULL,
                 PRIMARY KEY (chat_id, thread_id, telegram_id)
             );
+
+            CREATE TABLE IF NOT EXISTS operator_groups (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                bound_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, thread_id)
+            );
             """
         )
         migrate_schema(conn)
@@ -197,6 +204,23 @@ def migrate_schema(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operator_groups (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            bound_at TEXT NOT NULL,
+            PRIMARY KEY (chat_id, thread_id)
+        )
+        """
+    )
+    legacy_operator_chat_id = configured_operator_chat_id()
+    if legacy_operator_chat_id:
+        conn.execute(
+            "INSERT OR IGNORE INTO operator_groups (chat_id, thread_id, bound_at) VALUES (?, ?, ?)",
+            (legacy_operator_chat_id, configured_operator_thread_id(), now_iso()),
+        )
+
     user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "public_id" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN public_id TEXT")
@@ -883,6 +907,51 @@ def configured_operator_thread_id():
         return 0
 
 
+def operator_group_rows():
+    with closing(db()) as conn:
+        rows = conn.execute("SELECT chat_id, thread_id FROM operator_groups ORDER BY bound_at ASC").fetchall()
+    if rows:
+        return rows
+    chat_id = configured_operator_chat_id()
+    if not chat_id:
+        return []
+    return [{"chat_id": chat_id, "thread_id": configured_operator_thread_id()}]
+
+
+def operator_group_count():
+    return len(operator_group_rows())
+
+
+def add_operator_group(chat_id, thread_id):
+    with closing(db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO operator_groups (chat_id, thread_id, bound_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET bound_at = excluded.bound_at
+            """,
+            (chat_id, thread_id, now_iso()),
+        )
+        conn.commit()
+
+
+def remove_operator_group(chat_id, thread_id):
+    with closing(db()) as conn:
+        conn.execute("DELETE FROM operator_groups WHERE chat_id = ? AND thread_id = ?", (chat_id, thread_id))
+        conn.commit()
+
+
+def is_operator_group_bound(chat_id, thread_id=0):
+    for row in operator_group_rows():
+        if row["chat_id"] == chat_id and (not row["thread_id"] or row["thread_id"] == thread_id):
+            return True
+    return False
+
+
+def message_operator_group_target(message):
+    return message["chat"]["id"], int(message.get("message_thread_id") or 0)
+
+
 def same_topic(message, chat_id, thread_id):
     if not chat_id or message["chat"]["id"] != chat_id:
         return False
@@ -1005,7 +1074,7 @@ def build_global_stats():
     with closing(db()) as conn:
         submitted = conn.execute("SELECT COUNT(*) count FROM numbers").fetchone()["count"]
     supplier_bindings = 1 if configured_drop_chat_id() else 0
-    operator_bindings = 1 if configured_operator_chat_id() else 0
+    operator_bindings = operator_group_count()
     lines = [
         "📊 Статистика",
         f"Кол-во поставщиков (привязок): {supplier_bindings}",
@@ -1368,6 +1437,19 @@ def give_member_list_text(rows):
     return "\n".join(lines)
 
 
+def known_operator_group_members_for_groups(groups):
+    seen = set()
+    members = []
+    for group in groups:
+        thread_id = group["thread_id"] if group["thread_id"] else None
+        for row in known_operator_group_members(group["chat_id"], thread_id):
+            if row["telegram_id"] in seen:
+                continue
+            seen.add(row["telegram_id"])
+            members.append(row)
+    return members
+
+
 def find_give_target(message, argument):
     reply_from = (message.get("reply_to_message") or {}).get("from") or {}
     if not argument and is_real_telegram_user(reply_from):
@@ -1402,7 +1484,7 @@ def find_give_target(message, argument):
 def handle_give_command(message, issuer=None):
     chat_id = message["chat"]["id"]
     thread_id = int(message.get("message_thread_id") or 0)
-    if not same_topic(message, configured_operator_chat_id(), configured_operator_thread_id()):
+    if not is_operator_group_bound(chat_id, thread_id):
         send_message(chat_id, "⚠️ /give работает только в группе операторов, привязанной командой /op.", message_thread_id=thread_id or None)
         return True
     if not can_use_give_command(message, issuer):
@@ -1439,12 +1521,11 @@ def handle_private_give_command(chat_id, user):
     if not can_use_give_command({"chat": {"id": chat_id}, "from": {"id": user["telegram_id"]}}, user):
         send_message(chat_id, "⛔ /give доступна только админу или отдельным ID из GIVE_TELEGRAM_IDS.")
         return True
-    operator_chat_id = configured_operator_chat_id()
-    if not operator_chat_id:
+    groups = operator_group_rows()
+    if not groups:
         send_message(chat_id, "Группа операторов еще не привязана командой /op.")
         return True
-    thread_id = configured_operator_thread_id()
-    rows = known_operator_group_members(operator_chat_id, thread_id if thread_id else None)
+    rows = known_operator_group_members_for_groups(groups)
     send_message(chat_id, give_member_list_text(rows))
     return True
 
@@ -1470,22 +1551,32 @@ def bind_drop_group(message):
 def bind_operator_group(message):
     chat_id = message["chat"]["id"]
     thread_id = int(message.get("message_thread_id") or 0)
-    if configured_operator_chat_id() == chat_id and configured_operator_thread_id() == thread_id:
-        set_setting("operator_group_chat_id", 0)
-        set_setting("operator_group_thread_id", 0)
+    if is_operator_group_bound(chat_id, thread_id):
+        remove_operator_group(chat_id, thread_id)
+        if configured_operator_chat_id() == chat_id and configured_operator_thread_id() == thread_id:
+            remaining = operator_group_rows()
+            if remaining:
+                set_setting("operator_group_chat_id", remaining[-1]["chat_id"])
+                set_setting("operator_group_thread_id", remaining[-1]["thread_id"])
+            else:
+                set_setting("operator_group_chat_id", 0)
+                set_setting("operator_group_thread_id", 0)
         send_message(chat_id, "Группа операторов отвязана.", message_thread_id=thread_id or None)
         return True
+    add_operator_group(chat_id, thread_id)
     set_setting("operator_group_chat_id", chat_id)
     set_setting("operator_group_thread_id", thread_id)
-    send_message(chat_id, "Группа операторов привязана.", work_menu_keyboard(), message_thread_id=thread_id or None)
+    send_message(chat_id, f"Группа операторов привязана. Всего привязок: {operator_group_count()}.", work_menu_keyboard(), message_thread_id=thread_id or None)
     return True
 
 
-def operator_group_send(text, reply_markup=None):
-    chat_id = configured_operator_chat_id()
+def operator_group_send(text, reply_markup=None, chat_id=None, thread_id=None):
+    chat_id = chat_id or configured_operator_chat_id()
     if not chat_id:
         return None
-    return send_message(chat_id, text, reply_markup, message_thread_id=configured_operator_thread_id() or None)
+    if thread_id is None:
+        thread_id = configured_operator_thread_id()
+    return send_message(chat_id, text, reply_markup, message_thread_id=thread_id or None)
 
 
 def drop_group_send(text, reply_markup=None):
@@ -1526,7 +1617,7 @@ def supplier_queue_text(supplier_user_id):
     return "\n".join(lines)
 
 
-def publish_number_to_operator_group(number_id):
+def publish_number_to_operator_group(number_id, target_chat_id=None, target_thread_id=None):
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM numbers WHERE id = ?", (number_id,)).fetchone()
     if not row:
@@ -1534,12 +1625,14 @@ def publish_number_to_operator_group(number_id):
     message = operator_group_send(
         f"Номер #{row['id']} в очереди.\nНомер: {row['masked_number']}",
         work_number_keyboard(row["id"]),
+        target_chat_id,
+        target_thread_id,
     )
     if message:
         with closing(db()) as conn:
             conn.execute(
                 "UPDATE numbers SET operator_chat_id = ?, operator_thread_id = ?, operator_message_id = ? WHERE id = ?",
-                (configured_operator_chat_id(), configured_operator_thread_id(), message.get("message_id"), number_id),
+                (target_chat_id or configured_operator_chat_id(), target_thread_id if target_thread_id is not None else configured_operator_thread_id(), message.get("message_id"), number_id),
             )
             conn.commit()
     return message
@@ -1644,12 +1737,11 @@ def handle_work_group_text(message):
         return handle_give_command(message, issuer)
 
     drop_chat_id = configured_drop_chat_id()
-    operator_chat_id = configured_operator_chat_id()
     if not issuer:
         return False
     user = issuer
     in_drop_topic = same_topic(message, drop_chat_id, configured_drop_thread_id())
-    in_operator_topic = same_topic(message, operator_chat_id, configured_operator_thread_id())
+    in_operator_topic = is_operator_group_bound(chat_id, int(message.get("message_thread_id") or 0))
     if not work_enabled():
         return in_drop_topic or in_operator_topic
     if in_drop_topic:
@@ -1999,7 +2091,7 @@ def handle_broadcast_text(chat_id, admin, text, entities=None):
         send_message(chat_id, f"📣 Группа для рассылки по {target_title} не привязана.", admin_keyboard())
 
 
-def send_next_available_to_operator_group(operator_user=None, exclude_number_id=None):
+def send_next_available_to_operator_group(operator_user=None, exclude_number_id=None, target_chat_id=None, target_thread_id=None):
     with closing(db()) as conn:
         row = conn.execute(
             """
@@ -2011,7 +2103,7 @@ def send_next_available_to_operator_group(operator_user=None, exclude_number_id=
             (STATUS_AVAILABLE, exclude_number_id, exclude_number_id),
         ).fetchone()
         if not row:
-            operator_group_send("Сейчас свободных номеров нет.", work_menu_keyboard())
+            operator_group_send("Сейчас свободных номеров нет.", work_menu_keyboard(), target_chat_id, target_thread_id)
             return None
         if operator_user:
             conn.execute(
@@ -2027,11 +2119,13 @@ def send_next_available_to_operator_group(operator_user=None, exclude_number_id=
             message = operator_group_send(
                 f"Номер #{row['id']} взят.\nНомер: {row['masked_number']}\nОжидайте код от поставщика.",
                 work_active_keyboard(row["id"]),
+                target_chat_id,
+                target_thread_id,
             )
             if message:
                 conn.execute(
                     "UPDATE numbers SET operator_chat_id = ?, operator_thread_id = ?, operator_message_id = ? WHERE id = ?",
-                    (configured_operator_chat_id(), configured_operator_thread_id(), message.get("message_id"), row["id"]),
+                    (target_chat_id or configured_operator_chat_id(), target_thread_id if target_thread_id is not None else configured_operator_thread_id(), message.get("message_id"), row["id"]),
                 )
                 conn.commit()
             prompt = send_message(
@@ -2051,14 +2145,16 @@ def send_next_available_to_operator_group(operator_user=None, exclude_number_id=
                 )
                 conn.commit()
             return message
-    return publish_number_to_operator_group(row["id"])
+    return publish_number_to_operator_group(row["id"], target_chat_id, target_thread_id)
 
 
 def handle_work_callback(callback_id, callback, user, data):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     chat_id = callback["message"]["chat"]["id"]
-    if configured_operator_chat_id() and chat_id == configured_operator_chat_id():
+    target_chat_id = chat_id
+    target_thread_id = int(callback["message"].get("message_thread_id") or 0)
+    if is_operator_group_bound(target_chat_id, target_thread_id):
         user = set_user_role(user["id"], ROLE_OPERATOR)
     if action not in {"my_queue"} and not work_enabled():
         answer_callback(callback_id, "Ворк закончен.", True)
@@ -2088,7 +2184,7 @@ def handle_work_callback(callback_id, callback, user, data):
                     )
                     conn.commit()
                     log_event(user["id"], "number_skipped", number_id)
-        send_next_available_to_operator_group(user, number_id or None)
+        send_next_available_to_operator_group(user, number_id or None, target_chat_id, target_thread_id)
         answer_callback(callback_id)
         return
 
@@ -2097,7 +2193,7 @@ def handle_work_callback(callback_id, callback, user, data):
         return
     number_id = int(parts[2])
     if number_id == 0:
-        send_next_available_to_operator_group(user)
+        send_next_available_to_operator_group(user, target_chat_id=target_chat_id, target_thread_id=target_thread_id)
         answer_callback(callback_id, "Сначала возьмите номер.")
         return
     with closing(db()) as conn:
@@ -2122,11 +2218,13 @@ def handle_work_callback(callback_id, callback, user, data):
             message = operator_group_send(
                 f"Номер #{number_id} взят.\nНомер: {row['masked_number']}\nОжидайте код от поставщика.",
                 work_active_keyboard(number_id),
+                target_chat_id,
+                target_thread_id,
             )
             if message:
                 conn.execute(
                     "UPDATE numbers SET operator_chat_id = ?, operator_thread_id = ?, operator_message_id = ? WHERE id = ?",
-                    (configured_operator_chat_id(), configured_operator_thread_id(), message.get("message_id"), number_id),
+                    (target_chat_id or configured_operator_chat_id(), target_thread_id if target_thread_id is not None else configured_operator_thread_id(), message.get("message_id"), number_id),
                 )
                 conn.commit()
             prompt = send_message(
@@ -2156,7 +2254,7 @@ def handle_work_callback(callback_id, callback, user, data):
             if action == "reject":
                 conn.execute("UPDATE numbers SET pending_operator_user_id = NULL WHERE id = ?", (number_id,))
                 conn.commit()
-                operator_group_send(f"Номер {row['masked_number']} не выдан. Возьмите другой номер.", work_menu_keyboard())
+                operator_group_send(f"Номер {row['masked_number']} не выдан. Возьмите другой номер.", work_menu_keyboard(), target_chat_id, target_thread_id)
                 answer_callback(callback_id, "Отказано.")
                 return
             conn.execute(
@@ -2172,11 +2270,13 @@ def handle_work_callback(callback_id, callback, user, data):
             message = operator_group_send(
                 f"Номер #{number_id} взят.\nНомер: {row['masked_number']}\nОжидайте код от поставщика.",
                 work_active_keyboard(number_id),
+                target_chat_id,
+                target_thread_id,
             )
             if message:
                 conn.execute(
                     "UPDATE numbers SET operator_chat_id = ?, operator_thread_id = ?, operator_message_id = ? WHERE id = ?",
-                    (configured_operator_chat_id(), configured_operator_thread_id(), message.get("message_id"), number_id),
+                    (target_chat_id or configured_operator_chat_id(), target_thread_id if target_thread_id is not None else configured_operator_thread_id(), message.get("message_id"), number_id),
                 )
                 conn.commit()
             prompt = send_message(
@@ -2211,7 +2311,7 @@ def handle_work_callback(callback_id, callback, user, data):
             )
             conn.commit()
             log_event(user["id"], "number_done", number_id)
-            send_message(chat_id, f"По номеру {row['masked_number']} он встал.", work_menu_keyboard(), message_thread_id=configured_operator_thread_id() or None)
+            send_message(chat_id, f"По номеру {row['masked_number']} он встал.", work_menu_keyboard(), message_thread_id=target_thread_id or None)
             send_message(source_chat_id, f"По номеру {row['masked_number']} он встал.", message_thread_id=source_thread_id)
         elif action == "failed":
             conn.execute(
@@ -2220,11 +2320,11 @@ def handle_work_callback(callback_id, callback, user, data):
             )
             conn.commit()
             log_event(user["id"], "number_failed", number_id)
-            send_message(chat_id, f"По номеру {row['masked_number']} не встал.", work_menu_keyboard(), message_thread_id=configured_operator_thread_id() or None)
+            send_message(chat_id, f"По номеру {row['masked_number']} не встал.", work_menu_keyboard(), message_thread_id=target_thread_id or None)
             send_message(source_chat_id, f"По номеру {row['masked_number']} не встал.", message_thread_id=source_thread_id)
         elif action == "repeat_code":
             log_event(user["id"], "repeat_message_requested", number_id)
-            send_message(chat_id, f"По номеру {row['masked_number']} запрошен повтор кода.", work_active_keyboard(number_id), message_thread_id=configured_operator_thread_id() or None)
+            send_message(chat_id, f"По номеру {row['masked_number']} запрошен повтор кода.", work_active_keyboard(number_id), message_thread_id=target_thread_id or None)
             prompt = send_message(source_chat_id, f"Повторный код нужен по номеру, введите код в ответ на это сообщение {row['masked_number']}.", message_thread_id=source_thread_id)
             if prompt:
                 conn.execute(
